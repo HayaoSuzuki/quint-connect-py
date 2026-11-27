@@ -184,6 +184,63 @@ module quint_filesystem_test {
         readFileBytes(filesystem, secondAlias) == FileUnavailable(MissingFile) and
         readFileBytes(filesystem, callerFile) == FileBytes(List(255, 0)) and safety)
 
+  run workspaceNonFilesOccupyTheSameSlotsAsFilesAndAliasesTest =
+    init
+      .expect(not(canCreateWorkingNonFile(filesystem, 1, 1, 5)))
+      .then(reserve(1, 1, List("4", "2"), root))
+      .expect(not(canCreateWorkingNonFile(filesystem, 1, 2, 5)) and
+        not(canCreateWorkingNonFile(filesystem, 1, 1, -1)))
+      .then(createWorkspaceNonFile(1, 1, 5, WorkspaceDirectory))
+      .expect(not(canCreateWorkingNonFile(filesystem, 1, 1, 5)) and
+        not(canCreateWorkingAlias(filesystem, 1, 1, 5)) and
+        not(canRecordTraceFiles(filesystem, 1, GeneratedFiles(Map(5 -> bytesOfFirstCall)))))
+      .then(createWorkspaceAlias(1, 1, 6, callerFile))
+      .then(generate(1, GeneratedFiles(Map(trace -> bytesOfFirstCall))))
+      .expect(not(canCreateWorkingNonFile(filesystem, 1, 1, trace)) and
+        not(canCreateWorkingNonFile(filesystem, 1, 1, 6)) and
+        not(canReadGeneratedFile(filesystem, 1, 5)) and
+        workingEntries(filesystem, 1) == Set(trace, 5, 6) and safety)
+
+  run interruptedCleanupRetainsOnlySpecifiedOwnedEntriesTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserveAndGenerate(2, bytesOfSecondCall))
+      .then(createWorkspaceNonFile(1, 1, 5, WorkspaceDirectory))
+      .then(createWorkspaceNonFile(1, 1, 6, WorkspaceSpecial))
+      .then(createWorkspaceNonFile(2, 2, 5, WorkspaceSpecial))
+      .then(createWorkspaceNonFile(2, 2, 7, WorkspaceDirectory))
+      .then(createWorkspaceAlias(1, 1, 3, otherOwnerAlias))
+      .then(createWorkspaceAlias(2, 2, 3, callerFile))
+      .expect(not(canCleanupFiles(filesystem, 1, RemoveInterrupted(Set(7)))) and safety)
+      .then(cleanup(2, RemoveInterrupted(Set(3, 5, 7))))
+      .expect(workingEntries(filesystem, 2) == Set(3, 5, 7) and
+        workingEntries(filesystem, 1) == Set(trace, 2, 3, 5, 6) and safety)
+      .then(cleanup(1, RemoveInterrupted(Set(5))))
+      .expect(workingEntries(filesystem, 1) == Set(5) and
+        filesystem.nonFiles == Map(
+          workingPath(1, 5) -> WorkspaceDirectory,
+          workingPath(2, 5) -> WorkspaceSpecial,
+          workingPath(2, 7) -> WorkspaceDirectory,
+        ) and
+        filesystem.aliases == Map(otherOwnerAlias -> callerFile) and
+        filesystem.files == initialFiles.files and safety)
+
+  run completeCleanupRemovesOnlyOwnedNonFilesTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserveAndGenerate(2, bytesOfSecondCall))
+      .then(createWorkspaceNonFile(1, 1, 5, WorkspaceDirectory))
+      .then(createWorkspaceNonFile(1, 1, 6, WorkspaceSpecial))
+      .then(createWorkspaceNonFile(2, 2, 5, WorkspaceSpecial))
+      .then(createWorkspaceAlias(2, 2, 3, callerFile))
+      .then(cleanup(2, RemoveInterrupted(Set(3, 5))))
+      .then(cleanup(1, RemoveComplete))
+      .expect(workingEntries(filesystem, 1) == Set() and
+        filesystem.nonFiles == Map(workingPath(2, 5) -> WorkspaceSpecial) and
+        filesystem.aliases == Map(otherOwnerAlias -> callerFile) and
+        not(canCreateWorkingNonFile(filesystem, 1, 1, 5)) and
+        not(canCreateWorkingNonFile(filesystem, 2, 2, 6)) and safety)
+
   run artifactReservationIsExclusiveUntilAbandonedTest =
     init
       .then(reserveAndGenerate(1, bytesOfFirstCall))

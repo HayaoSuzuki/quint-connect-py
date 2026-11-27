@@ -1,7 +1,8 @@
 // Logical filesystem effects of generation, evidence retention, and cleanup.
-// Roots and path spellings are opaque labels. File entries hold opaque ITF
-// bytes or an alias to another path. Caller entries are fixed. A call owns
-// its fresh workspace and may exclusively reserve a directory under its artifact root.
+// Roots and path spellings are opaque labels. An entry can hold ITF bytes,
+// link to another path, or be an opaque private directory or special entry.
+// Caller entries are fixed. A call owns its fresh workspace and may exclusively
+// reserve a directory under its artifact root.
 module quint_filesystem {
   type Bytes = List[int]
   type TraceFiles = int -> Bytes
@@ -14,6 +15,9 @@ module quint_filesystem {
     | SavedFile(str)
     | WorkingFile({ workspace: int, trace: int })
     | EvidenceFile({ root: str, directory: int, trace: int })
+
+  // A private directory is one cleanup unit, including any contents.
+  type WorkspaceNonFile = WorkspaceDirectory | WorkspaceSpecial
 
   type ResolutionFailure = MissingFile | AliasCycle
   type FileResolution = ResolvedFile(FilePath) | UnresolvedFile(ResolutionFailure)
@@ -45,12 +49,13 @@ module quint_filesystem {
   type FileSystem = {
     files: FilePath -> Bytes,
     aliases: FilePath -> FilePath,
+    nonFiles: FilePath -> WorkspaceNonFile,
     workspaces: int -> WorkspaceFiles,
     artifactDirectories: ArtifactDirectory -> ArtifactDirectoryOwner,
   }
 
   pure val emptyFileSystem: FileSystem = {
-    files: Map(), aliases: Map(), workspaces: Map(), artifactDirectories: Map(),
+    files: Map(), aliases: Map(), nonFiles: Map(), workspaces: Map(), artifactDirectories: Map(),
   }
 
   pure def workingPath(workspace: int, trace: int): FilePath =
@@ -104,20 +109,32 @@ module quint_filesystem {
     workingTraces(fs.files.keys(), workspace)
 
   pure def workingEntries(fs: FileSystem, workspace: int): Set[int] =
-    workingTraces(fs.files.keys().union(fs.aliases.keys()), workspace)
+    workingTraces(fs.files.keys().union(fs.aliases.keys()).union(fs.nonFiles.keys()), workspace)
+
+  pure def workingNonFiles(fs: FileSystem, workspace: int): int -> WorkspaceNonFile =
+    workingTraces(fs.nonFiles.keys(), workspace).mapBy(trace => fs.nonFiles.get(workingPath(workspace, trace)))
 
   pure def workspaceAvailable(fs: FileSystem, workspace: int): bool =
     not(fs.workspaces.keys().contains(workspace))
 
-  pure def canCreateWorkingAlias(fs: FileSystem, workspace: int, owner: int, trace: int): bool =
+  pure def canCreateWorkingEntry(fs: FileSystem, workspace: int, owner: int, trace: int): bool =
     if (workspaceAvailable(fs, workspace)) false else {
       val ws = fs.workspaces.get(workspace)
       ws.owner == owner and ws.status == WorkspaceActive and trace >= 0 and
         not(workingEntries(fs, workspace).contains(trace))
     }
 
+  pure def canCreateWorkingAlias(fs: FileSystem, workspace: int, owner: int, trace: int): bool =
+    canCreateWorkingEntry(fs, workspace, owner, trace)
+
   pure def createWorkingAlias(fs: FileSystem, workspace: int, trace: int, target: FilePath): FileSystem =
     { ...fs, aliases: fs.aliases.put(workingPath(workspace, trace), target) }
+
+  pure def canCreateWorkingNonFile(fs: FileSystem, workspace: int, owner: int, trace: int): bool =
+    canCreateWorkingEntry(fs, workspace, owner, trace)
+
+  pure def createWorkingNonFile(fs: FileSystem, workspace: int, trace: int, kind: WorkspaceNonFile): FileSystem =
+    { ...fs, nonFiles: fs.nonFiles.put(workingPath(workspace, trace), kind) }
 
   pure def canReserveFiles(fs: FileSystem, workspace: int, owner: int): bool =
     workspaceAvailable(fs, workspace) and
@@ -145,9 +162,8 @@ module quint_filesystem {
       val ws = fs.workspaces.get(workspace)
       val files = writtenFiles(output)
       ws.status == WorkspaceActive and ws.output == NoGeneratedFiles and output != NoGeneratedFiles and
-        files.keys().forall(trace =>
-          trace >= 0 and validBytes(files.get(trace)) and not(fs.aliases.keys().contains(workingPath(workspace, trace)))
-        )
+        files.keys().intersect(workingEntries(fs, workspace)).size() == 0 and
+        files.keys().forall(trace => trace >= 0 and validBytes(files.get(trace)))
     }
 
   pure def recordTraceFiles(fs: FileSystem, workspace: int, output: GenerationFiles): FileSystem = {
@@ -355,8 +371,8 @@ module quint_filesystem {
         remainingAfterCleanup(outcome).subseteq(workingEntries(fs, workspace))
     }
 
-  // Cleanup unlinks workspace entries by their own paths. An I/O error can
-  // leave any subset of those entries behind.
+  // Cleanup removes workspace entries by their own paths. Aliases are
+  // unlinked without resolving them. An I/O error can leave any subset behind.
   pure def cleanupFiles(fs: FileSystem, workspace: int, outcome: CleanupOutcome): FileSystem = {
     val withoutEmptyReservation =
       if (fs.workspaces.get(workspace).evidence == NoEvidence) releaseArtifactDirectory(fs, workspace)
@@ -368,6 +384,7 @@ module quint_filesystem {
       ...withoutEmptyReservation,
       files: fs.files.keys().exclude(remove).mapBy(path => fs.files.get(path)),
       aliases: fs.aliases.keys().exclude(remove).mapBy(path => fs.aliases.get(path)),
+      nonFiles: fs.nonFiles.keys().exclude(remove).mapBy(path => fs.nonFiles.get(path)),
       workspaces: withoutEmptyReservation.workspaces.put(workspace, {
         ...ws,
         status: if (outcome == RemoveComplete) WorkspaceRemoved else WorkspacePartiallyRemoved,
@@ -449,13 +466,18 @@ module quint_filesystem {
       | SavedFile(_) => true
     }
 
-  pure def aliasEntryIsValid(fs: FileSystem, path: FilePath): bool =
+  pure def workingEntryIsValid(fs: FileSystem, path: FilePath): bool =
     match path {
-      | SavedFile(_) => true
-      | EvidenceFile(_) => false
       | WorkingFile(work) =>
         if (workspaceAvailable(fs, work.workspace)) false else
           work.trace >= 0 and fs.workspaces.get(work.workspace).status != WorkspaceRemoved
+      | _ => false
+    }
+
+  pure def aliasEntryIsValid(fs: FileSystem, path: FilePath): bool =
+    match path {
+      | SavedFile(_) => true
+      | _ => workingEntryIsValid(fs, path)
     }
 
   pure def fileSystemSafety(fs: FileSystem, initial: FileSystem): bool =
@@ -463,6 +485,8 @@ module quint_filesystem {
       savedFiles(fs) == savedFiles(initial),
       savedAliases(fs) == savedAliases(initial),
       fs.files.keys().intersect(fs.aliases.keys()).size() == 0,
+      fs.nonFiles.keys().intersect(fs.files.keys().union(fs.aliases.keys())).size() == 0,
+      fs.nonFiles.keys().forall(path => workingEntryIsValid(fs, path)),
       fs.aliases.keys().forall(path => aliasEntryIsValid(fs, path)),
       fs.files.keys().forall(path => fileDirectoryExists(fs, path)),
       initial.artifactDirectories.keys().forall(directory =>
@@ -524,6 +548,11 @@ module quint_filesystem_sample {
     filesystem' = createWorkingAlias(filesystem, workspace, trace, target),
   }
 
+  action createWorkspaceNonFile(workspace: int, owner: int, trace: int, kind: WorkspaceNonFile): bool = all {
+    canCreateWorkingNonFile(filesystem, workspace, owner, trace),
+    filesystem' = createWorkingNonFile(filesystem, workspace, trace, kind),
+  }
+
   action reserveArtifact(workspace: int, candidate: int): bool = all {
     canReserveArtifactDirectory(filesystem, workspace, candidate),
     filesystem' = reserveArtifactDirectory(filesystem, workspace, candidate),
@@ -578,6 +607,8 @@ module quint_filesystem_sample {
       generate(workspace, GeneratedFiles(Map(trace -> bytes, 2 -> List(0, 255)))),
       generate(workspace, AbortedFiles(Map(trace -> bytes.slice(0, 1)))),
       createWorkspaceAlias(workspace, workspace, 3, evidencePath(root, otherWorkspace, trace)),
+      createWorkspaceNonFile(workspace, workspace, 4, WorkspaceDirectory),
+      createWorkspaceNonFile(workspace, workspace, 5, WorkspaceSpecial),
       reserveArtifact(workspace, candidate),
       stageReserved(workspace, trace),
       stage(workspace, trace),
@@ -589,6 +620,8 @@ module quint_filesystem_sample {
       cleanup(workspace, RemoveComplete),
       cleanup(workspace, RemoveInterrupted(Set(trace))),
       cleanup(workspace, RemoveInterrupted(Set(3))),
+      cleanup(workspace, RemoveInterrupted(Set(4))),
+      cleanup(workspace, RemoveInterrupted(Set(3, 4, 5))),
     }
   }
 }
