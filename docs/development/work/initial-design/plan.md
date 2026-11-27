@@ -50,26 +50,28 @@ quint run spec/quint_connect.qnt --main=quint_connect_sample --invariant=safety 
 
 - [ ] Rust テストで真偽値と整数、リストとタプル、レコードとマップを区別する。レコードを含む集合と、レコードをキーにするマップは、順序を変えても一致させる。Python テストで `2**100` を含む値が Rust との境界を往復できることを確認する。
 - [ ] Rust テストで、両取得元での引数直下の `Some` と `None`、ネスト内のレコード、明示操作の空タプル、予約メタデータと `vars` の重複、選択範囲内外の `#unserializable`、末尾の不正ステップ、空トレースを確認する。
-- [ ] `Value` は `BigInt`、真偽値、文字列、順序付きのリストとタプル、レコード、順序を無視する集合とマップを持つ Rust の enum とする。集合とマップの表現には `BTreeSet<Value>` と `BTreeMap<Value, Value>` を使い、構造と型を維持する。 `decode_trace(bytes: &[u8], selection: &Selection) -> Result<Vec<TraceStep>, ItfError>` は `serde_json` で読み取った一件を検証済みのステップ列に変換する。JSON オブジェクトを読む段階でキーの重複を検出し、`vars` の配列内の重複と区別する。`TraceStep` は `Action` と `expected: Value` を保持する。
+- [ ] `Value` は `BigInt`、真偽値、文字列、順序付きのリストとタプル、レコード、順序を無視する集合とマップを持つ Rust の enum とする。集合とマップの表現には `BTreeSet<Value>` と `BTreeMap<Value, Value>` を使い、構造と型を維持する。 `decode_trace(bytes: &[u8], selection: &Selection) -> Result<Vec<TraceStep>, ItfError>` は一件分のバイト列を検証済みのステップ列に変換する。UTF-8 と JSON の構文を検証する。JSON オブジェクトを読む段階で展開済みのキーの重複を検出し、`vars` の配列内の重複と区別する。JSON 数値は選択外のメタデータにも現れるため、構文の受理と ITF 値としての受理を別々に確認する。数値の構文は指数の大きさによらず受理し、コンテナーの深さは明示的なスタックなどで扱う。`serde_json` を使う場合は、既定の数値範囲と再帰制限に依存せず、重複キーと数値トークンの種別を保持できる構成を選ぶ。`TraceStep` は `Action` と `expected: Value` を保持する。[serde_json のデシリアライザー](https://docs.rs/serde_json/latest/serde_json/struct.Deserializer.html)
 - [ ] Python に `Action(name, arguments)`、`QuintSet(values)`、`QuintMap(entries)` を公開する。後二者は要素またはキーと値の組を読み取れるようにし、Python の `QuintValue` が対応する組み込み型と二つの値型の和を表すようにする。変換は `src/python/value.rs` に限る。Rust 側の整数には `num-bigint` を使い、Python との変換にも同じ精度を保つ。
-- [ ] `cargo test --no-default-features`、`uv run --group test pytest -q tests/test_values.py`、Quint の `invalidLaterStepBlocksFactoryTest|invalidNextTraceCannotReturnSuccessTest|emptyInputAndEmptyStatesAreDistinctTest` と `replayInOrder` を実行する。[ITF 変換](../../../../spec/quint_itf_test.qnt)と[複合値の等値性](../../../../spec/quint_values_test.qnt)の Quint シナリオも実行する。
+- [ ] `cargo test --no-default-features`、`uv run --group test pytest -q tests/test_values.py`、Quint の `invalidLaterStepBlocksFactoryTest|invalidNextTraceCannotReturnSuccessTest|emptyInputAndEmptyStatesAreDistinctTest` と `replayInOrder` を実行する。[UTF-8 と JSON](../../../../spec/quint_json_test.qnt)、[バイト列からの ITF 変換](../../../../spec/quint_itf_test.qnt)、[複合値の等値法則](../../../../spec/quint_values_test.qnt)の Quint シナリオも実行する。Rust では不正な UTF-8、先頭の BOM、孤立したサロゲート、直接記述とエスケープの等価性、エスケープ展開後の重複、大きな指数を持つ選択外のメタデータ、深さ 150 の JSON をバイト列から確認する。
 
 ## タスク 3　保存済み ITF と Python ドライバーの再生
 
 **ファイル** `src/replay.rs`、`src/python/mod.rs`、`src/python/error.rs`、`python/quint_connect/__init__.py`、`python/quint_connect/_native.pyi`、`tests/test_replay.py`。
 
 - [ ] `test_replays_repeated_path_in_fresh_drivers` で同じパスを二回渡してファクトリー二回を確認する。`test_invalid_trace_has_no_driver_calls` は壊れた末尾でファクトリーが呼ばれないことを確認する。`test_stops_at_first_mismatch_with_original_arguments` は操作の省略と可変引数の変更を行い、期待値、実測値、元の操作引数が残り、後続操作とファイルへ進まないことを確認する。
+- [ ] 存在しないファイルや読み取りに失敗したファイルで、指定したパスと原因が診断に残ることを確認する。二件目が破損している場合は一件目が完了してから二件目を開き、三件目を開かないことを確認する。
 - [ ] `test_driver_error_preserves_cause` はファクトリー、操作、観測の三段階それぞれで Python の元例外が `__cause__` に残ることを確認する。未対応の値を観測したときの段階も確認する。
 - [ ] `replay<D: Driver>(paths: &[PathBuf], factory: impl FnMut() -> Result<D, D::Error>, selection: &Selection) -> Result<(), ReplayError<D::Error>>` を Rust の共通再生処理にする。内部の `Driver` trait は `type Error`、`apply(&mut self, action: &Action) -> Result<(), Self::Error>`、`observe(&mut self) -> Result<Value, Self::Error>` を持つ。ファクトリーは一件の ITF の検証後に呼ぶ。選択パスは API 呼び出し単位で固定し、各 ITF に同じパスを適用する。PyO3 側は Python の呼び出しごとに値を変換する。ドライバーは引数の Python 側のコピーを受け取る。
 - [ ] `replay(traces, driver_factory, *, action_path=(), state_path=()) -> None` を公開する。Python の `Driver` は `step(action: Action) -> None` と `observe() -> QuintValue` を持つ。例外は `InvalidTraceError`、`EmptyTraceError`、`DriverError`、`StateMismatchError` に分ける。不一致は `AssertionError` のサブクラスで、`trace_path`、`trace_index`、`step_index`、`action`、`expected`、`actual` を提供する。
-- [ ] `cargo test --no-default-features`、`uv run --group test pytest -q tests/test_replay.py`、Quint の `repeatedSavedPathGetsNewDriverTest|secondTraceUsesItsOwnOperationAndExpectedValueTest|cannotApplyAfterFirstMismatchTest` と `firstFailureStopsReplay` を実行する。`compoundEqualityDeterminesReplaySuccessTest` で再生と複合値比較の接続を確認する。
+- [ ] `cargo test --no-default-features`、`uv run --group test pytest -q tests/test_replay.py`、Quint の `repeatedSavedPathGetsNewDriverTest|secondTraceUsesItsOwnOperationAndExpectedValueTest|cannotApplyAfterFirstMismatchTest` と `firstFailureStopsReplay` を実行する。`compoundEqualityDeterminesReplaySuccessTest` で再生と複合値比較の接続を確認し、[パス指定による保存済み ITF のシナリオ](../../../../spec/quint_saved_replay_test.qnt)で読み取り順とパス付き診断を確認する。
 
 ## タスク 4　Quint 起動、成果物、作業先
 
 **ファイル** `src/quint.rs`、`src/python/mod.rs`、`src/python/error.rs`、`python/quint_connect/__init__.py`、`python/quint_connect/_native.pyi`、`tests/test_run.py`。
 
 - [ ] Rust テストで数値順の `2 < 10`、終了失敗と部分出力の優先順、空出力と件数不足、名前付きテストの完全一致、先行エラーがある場合の掃除失敗を確認する。`test_seed_range_and_type` は Python API から `0` と `2**64 - 1` を渡し、範囲外と真偽値を拒否することを確認する。
-- [ ] `test_saved_bytes_survive_workspace_cleanup` で保存後のバイト列と同じ不一致を確認する。保存先を確保できない場合、作業先を作れない場合、掃除だけが失敗した場合もテストする。
+- [ ] `max_samples < n_traces` と負の `max_steps` をシミュレーションで拒否し、名前付きテストでは 0 以下の `max_samples` を拒否する。件数と上限に共通の最大値 `2**53 - 1` と、その直上を確認する。いずれも作業先の作成と CLI の起動に進まないことを確認する。`max_samples=n_traces` を受理し、`max_steps=0` で初期状態だけを生成することを両評価器で確認する。
+- [ ] `test_saved_bytes_survive_workspace_cleanup` で元のバイト列と保存後のバイト列を比較し、例外から取得した `artifact_path` を `replay()` に渡して同じ操作と値の不一致が再現されることを確認する。保存先を確保できない場合、作業先を作れない場合、掃除だけが失敗した場合もテストする。
 - [ ] `Simulation(spec, *, main=None, init=None, step=None, n_traces=1, max_samples=None, max_steps=None)` と `NamedTest(spec, *, test, main=None, max_samples=None)` を公開する。`run(config, driver_factory, *, quint, seed=None, backend=None, action_path=(), state_path=(), artifact_dir=None) -> None` は Rust の `std::process::Command` に引数を渡す。予約した作業先を子プロセスのカレントディレクトリにし、`trace_{seq}.itf.json` を出力する。モデルと実行ファイルの明示的な相対パスは起動前に解決する。成功時は作業先の一覧から出力名とファイルを対応づけ、数値順へ整えた生成物をタスク 3 の再生処理へ渡す。seed の省略時は OS の乱数を使って Rust 側で `u64` を選ぶ。Quint の起動やファイル処理の間は Python インタープリターから離れ、ドライバーを呼ぶときに再びアタッチする。
 - [ ] 作業先と保存先には別々の専用ディレクトリを確保する。失敗 ITF は全バイトをコピーしてから保存先のパスに公開する。CLI の失敗は `QuintError`、出力不足は `IncompleteGenerationError`、作業先の失敗は `WorkspaceError` とする。生成トレースの不一致には `seed` と `artifact_path` または `artifact_error` を付け、掃除で二次的な失敗があれば元の例外に付記する。
 - [ ] `cargo test --no-default-features`、`uv run --group test pytest -q tests/test_run.py`、Quint の `generationErrorsBlockReplayTest|generatedAndSavedMismatchAgreeTest|saveFailureRetainsMismatchTest|cleanupOnlyBecomesPrimaryAfterPassingTest` と `mismatchKeepsEvidence`、`consistentResult`、`persistedEvidence` を実行する。[CLI](../../../../spec/quint_cli_test.qnt)と[ファイルシステム](../../../../spec/quint_filesystem_test.qnt)の Quint シナリオを実行し、`sortedGenerationAndSavedBytesReproduceMismatchTest` で再生までの接続を確認する。
@@ -81,7 +83,7 @@ quint run spec/quint_connect.qnt --main=quint_connect_sample --invariant=safety 
 - [ ] カウンターモデルで保存済み ITF、`run --mbt`、明示操作の名前付きテスト、Hypothesis の `@given(st.integers(min_value=0, max_value=2**64 - 1))` を使う例を作る。生成は Quint 0.34.0 の Rust・TypeScript で成功することを確認する。
 - [ ] 上流の `tictactoe.qnt` を指定リビジョンのまま fixture にし、出典とライセンスを記録する。Python ドライバーで `init`、`MoveX`、`MoveO`、`stuttered` を処理して再生する。[上流のモデル](https://github.com/quint-co/quint-connect/blob/3b9eab8d817cbcd6de64ca1b05a20f18b96797ef/connect/examples/tictactoe/spec/tictactoe.qnt)
 - [ ] `pytest -n 2 --dist=each` で同じテストを二つのワーカーに実行させる。モデル、seed、成果物の親ディレクトリを共有し、分離した作業先と保存先で、どちらの不一致も再現できることを確認する。
-- [ ] `uv run --group test pytest -q tests/test_quint_integration.py tests/test_xdist.py`、Quint の `interleavedRunsKeepSeparateArtifactsTest` と `isolatedResources` を実行する。
+- [ ] `uv run --group test pytest -q tests/test_quint_integration.py tests/test_xdist.py`、Quint の `interleavedRunsKeepSeparateArtifactsTest` と `isolatedResources` に加え、[四件の並行シナリオ](../../../../spec/quint_parallel_test.qnt)と[四つの作業先を確保した状態からのシミュレーション](../../../../spec/quint_parallel.qnt)を実行する。
 
 ## タスク 6　配布検証と設計レビュー
 
