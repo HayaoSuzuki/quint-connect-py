@@ -641,16 +641,33 @@ impl GeneratedRun {
                     json!({"location": tagged("AtGeneratedTrace", self.trace_details(&trace)), "cause": cause}),
                 )
             }
-            Failure::Replay(ReplayError::Mismatch(mismatch)) => {
-                let mut detail = mismatch_json(&mismatch);
-                detail["position"] = self.step_position(&mismatch.trace, mismatch.step_index);
-                let saved = self.save_result(&mismatch.trace, &result.artifact.unwrap());
-                tagged(
-                    "StatesDiffer",
-                    json!({
-                        "detail": detail, "artifacts": tagged("FromGeneration", json!({"seed": seed, "save": saved})),
-                    }),
-                )
+            Failure::Replay(ReplayError::FailedTrace(failure)) => {
+                let trace = &failure.trace;
+                let saved = self.save_result(trace, &result.artifact.unwrap());
+                let artifacts = tagged("FromGeneration", json!({"seed": seed, "save": saved}));
+                match failure.problem {
+                    TraceProblem::Mismatch(mismatch) => {
+                        let mut detail = mismatch_json(trace, &mismatch);
+                        detail["position"] = self.step_position(trace, mismatch.step_index);
+                        tagged(
+                            "StatesDiffer",
+                            json!({"detail": detail, "artifacts": artifacts}),
+                        )
+                    }
+                    TraceProblem::Driver { step, stage, cause } => {
+                        let location = step.map_or_else(
+                            || tagged("AtTrace", self.position(trace)),
+                            |index| tagged("AtStep", self.step_position(trace, index)),
+                        );
+                        let detail = json!({"location": location, "stage": driver_stage(stage), "cause": *cause});
+                        tagged(
+                            "GeneratedDriverFailed",
+                            json!({
+                                "position": self.position(trace), "detail": detail, "artifacts": artifacts,
+                            }),
+                        )
+                    }
+                }
             }
             failure => panic!("unsupported fixture outcome {failure:?}"),
         };
@@ -794,6 +811,11 @@ fn check(name: &str) {
 #[test]
 fn artifact_directory_failure() {
     check("artifactDirectoryFailure");
+}
+
+#[test]
+fn generated_driver_failure_saved() {
+    check("generatedDriverFailureSaved");
 }
 
 #[test]

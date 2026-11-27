@@ -16,7 +16,7 @@ python3 tools/export_quint_fixtures.py
 python3 tools/export_quint_fixtures.py --check
 ```
 
-Run `cargo test --lib conformance` to check the 15 cases against the Rust
+Run `cargo test --lib conformance` to check the 16 cases against the Rust
 implementation. Each test reads one case and supplies its responses to the
 production runner. The tests compare the generation and replay event histories,
 diagnostics, saved files, and remaining workspace files with the fixture JSON.

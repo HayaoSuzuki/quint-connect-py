@@ -9,6 +9,13 @@ pub trait Driver {
 
     fn apply(&mut self, action: &Action) -> Result<(), Self::Error>;
     fn observe(&mut self) -> Result<Value, Self::Error>;
+    fn finish(
+        &mut self,
+        _trace: &TraceFile,
+        _problem: Option<&TraceProblem<Self::Error>>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -35,16 +42,43 @@ pub enum DriverStage {
     Factory,
     Apply,
     Observe,
+    Exit,
 }
 
 #[derive(Debug)]
 pub struct Mismatch {
-    pub trace: TraceFile,
     pub step_index: usize,
     pub step: TraceStep,
     pub actual: Value,
-    // The bytes that were decoded and replayed, retained for evidence.
+}
+
+#[derive(Debug)]
+pub enum TraceProblem<E> {
+    Driver {
+        step: Option<usize>,
+        stage: DriverStage,
+        cause: Box<E>,
+    },
+    Mismatch(Mismatch),
+}
+
+impl<E> TraceProblem<E> {
+    fn driver(step: Option<usize>, stage: DriverStage, cause: E) -> Self {
+        Self::Driver {
+            step,
+            stage,
+            cause: Box::new(cause),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FailedTrace<E> {
+    pub trace: TraceFile,
+    // Retain the exact bytes that were decoded and replayed.
     pub bytes: Vec<u8>,
+    pub problem: TraceProblem<E>,
+    pub driver_cleanup: Option<Box<E>>,
 }
 
 #[derive(Debug)]
@@ -62,13 +96,7 @@ pub enum ReplayError<E> {
         step: Option<usize>,
         cause: TraceCause,
     },
-    Driver {
-        trace: TraceFile,
-        step: Option<usize>,
-        stage: DriverStage,
-        cause: Box<E>,
-    },
-    Mismatch(Box<Mismatch>),
+    FailedTrace(Box<FailedTrace<E>>),
 }
 
 #[cfg_attr(
@@ -105,12 +133,14 @@ impl<D: Driver, F: FnMut() -> Result<D, D::Error>> ReplayEnvironment for LocalEn
     }
 }
 
-/// Reads and validates one trace at a time and retains the bytes of the first mismatch.
+type DriverErrorOf<E> = <<E as ReplayEnvironment>::Driver as Driver>::Error;
+
+/// Reads and validates each trace, then closes its driver before advancing.
 pub fn replay<E: ReplayEnvironment>(
     files: &[TraceFile],
     selection: &Selection,
     environment: &mut E,
-) -> Result<(), ReplayError<<E::Driver as Driver>::Error>> {
+) -> Result<(), ReplayError<DriverErrorOf<E>>> {
     if files.is_empty() {
         return Err(ReplayError::NoInput);
     }
@@ -131,35 +161,66 @@ pub fn replay<E: ReplayEnvironment>(
                 cause: TraceCause::Decode(cause),
             },
         })?;
-        let driver_error = |step, stage, cause| ReplayError::Driver {
-            trace: trace.clone(),
-            step,
-            stage,
-            cause: Box::new(cause),
-        };
-        environment.event(ReplayEvent::Factory(trace));
-        let mut driver = environment
-            .create_driver()
-            .map_err(|cause| driver_error(None, DriverStage::Factory, cause))?;
-        environment.event(ReplayEvent::DriverCreated(trace));
-        for (index, step) in steps.into_iter().enumerate() {
-            environment.event(ReplayEvent::Apply(trace, index, &step.action));
-            driver
-                .apply(&step.action)
-                .map_err(|cause| driver_error(Some(index), DriverStage::Apply, cause))?;
-            environment.event(ReplayEvent::Observe(trace, index, &step.expected));
-            let actual = driver
-                .observe()
-                .map_err(|cause| driver_error(Some(index), DriverStage::Observe, cause))?;
-            if step.expected != actual {
-                return Err(ReplayError::Mismatch(Box::new(Mismatch {
-                    trace: trace.clone(),
-                    step_index: index,
-                    step,
-                    actual,
-                    bytes,
-                })));
+        replay_trace(trace, steps, bytes, environment)?;
+    }
+    Ok(())
+}
+
+fn replay_trace<E: ReplayEnvironment>(
+    trace: &TraceFile,
+    steps: Vec<TraceStep>,
+    bytes: Vec<u8>,
+    environment: &mut E,
+) -> Result<(), ReplayError<DriverErrorOf<E>>> {
+    environment.event(ReplayEvent::Factory(trace));
+    let (problem, driver_cleanup) = match environment.create_driver() {
+        Ok(mut driver) => {
+            environment.event(ReplayEvent::DriverCreated(trace));
+            let result = replay_steps(trace, steps, environment, &mut driver);
+            let cleanup = driver.finish(trace, result.as_ref().err());
+
+            match (result, cleanup) {
+                (Ok(()), Ok(())) => return Ok(()),
+                (Ok(()), Err(cause)) => {
+                    (TraceProblem::driver(None, DriverStage::Exit, cause), None)
+                }
+                (Err(problem), cleanup) => (problem, cleanup.err().map(Box::new)),
             }
+        }
+        Err(cause) => (
+            TraceProblem::driver(None, DriverStage::Factory, cause),
+            None,
+        ),
+    };
+    Err(ReplayError::FailedTrace(Box::new(FailedTrace {
+        trace: trace.clone(),
+        bytes,
+        problem,
+        driver_cleanup,
+    })))
+}
+
+fn replay_steps<E: ReplayEnvironment>(
+    trace: &TraceFile,
+    steps: Vec<TraceStep>,
+    environment: &mut E,
+    driver: &mut E::Driver,
+) -> Result<(), TraceProblem<DriverErrorOf<E>>> {
+    for (index, step) in steps.into_iter().enumerate() {
+        environment.event(ReplayEvent::Apply(trace, index, &step.action));
+        driver
+            .apply(&step.action)
+            .map_err(|cause| TraceProblem::driver(Some(index), DriverStage::Apply, cause))?;
+        environment.event(ReplayEvent::Observe(trace, index, &step.expected));
+        let actual = driver
+            .observe()
+            .map_err(|cause| TraceProblem::driver(Some(index), DriverStage::Observe, cause))?;
+        if step.expected != actual {
+            return Err(TraceProblem::Mismatch(Mismatch {
+                step_index: index,
+                step,
+                actual,
+            }));
         }
     }
     Ok(())

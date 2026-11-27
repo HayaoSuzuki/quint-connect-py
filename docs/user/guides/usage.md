@@ -22,6 +22,31 @@ from `action.arguments`. Handle initialization through the operation recorded
 at step 0. Quint records an empty name for anonymous operations.
 
 Provide a factory that returns a fresh driver each time Quint Connect calls it.
+If a driver owns resources, supply `driver_context` as a factory that opens a
+context manager yielding the driver. For example, given your test harness's
+`open_environment` and `TestDriver`:
+
+```python
+from contextlib import contextmanager
+from quint_connect import replay
+
+
+@contextmanager
+def driver_context():
+    with open_environment() as environment:
+        yield TestDriver(environment)
+
+
+replay(["first.itf.json", "second.itf.json"], driver_context=driver_context)
+```
+
+Each context is entered after its trace is validated and exited before the
+next trace starts. Supply either the driver factory or `driver_context`.
+On failure, the context receives the original driver exception or a
+`StateMismatchError`. A context manager's return value cannot suppress the
+replay failure. A failure during exit produces `DriverError` with
+`DriverStage.EXIT` if the trace passed. If replay failed first, the exit
+exception is available as `driver_cleanup_error` on the original error.
 
 ## Replay a saved ITF trace
 
@@ -39,13 +64,14 @@ offline.
 ## Generate traces with Quint
 
 ```python
-from quint_connect import Simulation, run
+from quint_connect import Backend, Simulation, run
 
 run(
     Simulation("counter.qnt", n_traces=10),
     CounterDriver,
     quint="/path/to/quint",
     seed=42,
+    backend=Backend.RUST,
     state_path=("count",),
 )
 ```
@@ -53,9 +79,15 @@ run(
 The first release targets the Rust and TypeScript backends of Quint 0.34.0.
 To generate traces from a named test, pass
 `NamedTest("counter.qnt", test="roundTripTest")` and set `action_path` to the
-field path where the model records the operation. If a generated trace reveals
-a state mismatch, use the exception's `seed` and `artifact_path` to identify
-the run and pass the saved trace to `replay()`.
+field path where the model records the operation. `StateMismatchError` and
+`DriverError` from generated traces expose `seed` and `artifact_path`. Pass
+the saved ITF to `replay()` with the same driver and selectors. When
+specifying `artifact_dir`, create the parent directory before calling
+`run()`. If saving fails, inspect `artifact_error`.
+
+Use enum members such as `Backend.RUST` for evaluator selection and
+`DriverStage.APPLY`, `QuintStage.LOOKUP`, or `WorkspaceStage.RESERVE` to
+inspect failure stages.
 
 ## Run from pytest
 

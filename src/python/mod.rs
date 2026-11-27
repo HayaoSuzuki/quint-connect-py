@@ -8,7 +8,9 @@ use pyo3::prelude::*;
 
 use crate::cli::{Mode, Request};
 use crate::itf::{Action, Selection};
-use crate::replay::{Driver, LocalEnvironment, replay as replay_files, saved_files};
+use crate::replay::{
+    Driver, LocalEnvironment, TraceFile, TraceProblem, replay as replay_files, saved_files,
+};
 use crate::runner::run as run_model;
 use crate::value::Value;
 
@@ -16,6 +18,7 @@ use self::value::Types;
 
 struct PythonDriver {
     object: Py<PyAny>,
+    exit: Option<Py<PyAny>>,
     types: Arc<Types>,
 }
 
@@ -36,14 +39,53 @@ impl Driver for PythonDriver {
             self.types.read(&observed)
         })
     }
+
+    fn finish(&mut self, trace: &TraceFile, problem: Option<&TraceProblem<PyErr>>) -> PyResult<()> {
+        let Some(exit) = self.exit.take() else {
+            return Ok(());
+        };
+        Python::attach(|py| {
+            let exit = exit.bind(py);
+            match problem {
+                None => exit.call1((py.None(), py.None(), py.None()))?,
+                Some(problem) => {
+                    let exception = match problem {
+                        TraceProblem::Driver { cause, .. } => cause.clone_ref(py),
+                        TraceProblem::Mismatch(mismatch) => {
+                            error::mismatch_exception(py, &self.types, trace, mismatch)
+                                .unwrap_or_else(|error| error)
+                        }
+                    };
+                    exit.call1((
+                        exception.get_type(py),
+                        exception.value(py),
+                        exception.traceback(py),
+                    ))?
+                }
+            };
+            Ok(())
+        })
+    }
 }
 
-fn factory(factory: Py<PyAny>, types: Arc<Types>) -> impl FnMut() -> PyResult<PythonDriver> + Send {
+type DriverSetup = (Py<PyAny>, bool);
+
+fn factory(
+    (factory, managed): DriverSetup,
+    types: Arc<Types>,
+) -> impl FnMut() -> PyResult<PythonDriver> + Send {
     move || {
         Python::attach(|py| {
-            let object = factory.bind(py).call0()?.unbind();
+            let product = factory.bind(py).call0()?;
+            let (object, exit) = if managed {
+                let exit = product.getattr("__exit__")?.unbind();
+                (product.call_method0("__enter__")?, Some(exit))
+            } else {
+                (product, None)
+            };
             Ok(PythonDriver {
-                object,
+                object: object.unbind(),
+                exit,
                 types: Arc::clone(&types),
             })
         })
@@ -67,11 +109,11 @@ fn selection((action_path, state_path): SelectionPaths) -> Selection {
 fn replay(
     py: Python<'_>,
     paths: Vec<PathBuf>,
-    driver_factory: Py<PyAny>,
+    driver_setup: DriverSetup,
     paths_selection: SelectionPaths,
 ) -> PyResult<()> {
     let types = Arc::new(Types::load(py)?);
-    let mut environment = LocalEnvironment(factory(driver_factory, Arc::clone(&types)));
+    let mut environment = LocalEnvironment(factory(driver_setup, Arc::clone(&types)));
     let caller = std::env::current_dir()?;
     let files = saved_files(&paths, &caller);
     let selection = selection(paths_selection);
@@ -89,7 +131,7 @@ fn run(
     common: Common,
     named_test: Option<String>,
     simulation: Option<Simulation>,
-    driver_factory: Py<PyAny>,
+    driver_setup: DriverSetup,
     execution: Execution,
     paths_selection: SelectionPaths,
 ) -> PyResult<()> {
@@ -121,7 +163,7 @@ fn run(
     };
     let selection = selection(paths_selection);
     let types = Arc::new(Types::load(py)?);
-    let mut environment = LocalEnvironment(factory(driver_factory, Arc::clone(&types)));
+    let mut environment = LocalEnvironment(factory(driver_setup, Arc::clone(&types)));
     let result = py.detach(move || run_model(&request, &selection, &mut environment));
     result.map_err(|failure| error::from_run(py, &types, *failure))
 }

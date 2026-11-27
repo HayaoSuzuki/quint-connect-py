@@ -1,11 +1,13 @@
 """Run Quint model traces against a Python driver."""
 
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 from . import _native
+from ._enums import Backend, DriverStage, QuintStage, WorkspaceStage
 from ._native import (
     DriverError,
     EmptyTraceError,
@@ -18,8 +20,10 @@ from ._native import (
 
 __all__ = [
     "Action",
+    "Backend",
     "Driver",
     "DriverError",
+    "DriverStage",
     "EmptyTraceError",
     "IncompleteGenerationError",
     "InvalidTraceError",
@@ -27,16 +31,17 @@ __all__ = [
     "QuintError",
     "QuintMap",
     "QuintSet",
+    "QuintStage",
     "QuintValue",
     "Simulation",
     "StateMismatchError",
     "WorkspaceError",
+    "WorkspaceStage",
     "replay",
     "run",
 ]
 
 type FilePath = str | PathLike[str]
-type Backend = Literal["rust", "typescript"]
 type QuintValue = (
     bool
     | int
@@ -123,10 +128,23 @@ def _unsigned(name: str, value: int | None) -> int | None:
     return value
 
 
+def _driver_setup(
+    factory: Callable[[], Driver] | None,
+    context: Callable[[], AbstractContextManager[Driver]] | None,
+) -> tuple[Callable[[], Driver | AbstractContextManager[Driver]], bool]:
+    if factory is not None and context is None:
+        return factory, False
+    if context is not None and factory is None:
+        return context, True
+    message = "supply exactly one of driver_factory and driver_context"
+    raise TypeError(message)
+
+
 def replay(
     traces: FilePath | Sequence[FilePath],
-    driver_factory: Callable[[], Driver],
+    driver_factory: Callable[[], Driver] | None = None,
     *,
+    driver_context: Callable[[], AbstractContextManager[Driver]] | None = None,
     action_path: Sequence[str] = (),
     state_path: Sequence[str] = (),
 ) -> None:
@@ -134,13 +152,16 @@ def replay(
     paths = (
         [cast("FilePath", traces)] if isinstance(traces, (str, PathLike)) else traces
     )
-    _native.replay(paths, driver_factory, (action_path, state_path))
+    _native.replay(
+        paths, _driver_setup(driver_factory, driver_context), (action_path, state_path)
+    )
 
 
 def run(  # noqa: PLR0913 - The documented options are keyword-only.
     config: Simulation | NamedTest,
-    driver_factory: Callable[[], Driver],
+    driver_factory: Callable[[], Driver] | None = None,
     *,
+    driver_context: Callable[[], AbstractContextManager[Driver]] | None = None,
     quint: FilePath,
     seed: int | None = None,
     backend: Backend | None = None,
@@ -150,9 +171,9 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
 ) -> None:
     """Generate Quint traces and replay each one with a fresh driver."""
     seed = _unsigned("seed", seed)
-    if backend not in (None, "rust", "typescript"):
-        message = "backend must be 'rust' or 'typescript'"
-        raise ValueError(message)
+    if backend is not None and not isinstance(backend, Backend):
+        message = "backend must be a Backend member"
+        raise TypeError(message)
     if isinstance(config, Simulation):
         traces = _unsigned("n_traces", config.n_traces)
         if traces is None:
@@ -175,7 +196,7 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
         (config.spec, config.main, _unsigned("max_samples", config.max_samples)),
         mode,
         options,
-        driver_factory,
-        (quint, seed, backend, artifact_dir),
+        _driver_setup(driver_factory, driver_context),
+        (quint, seed, None if backend is None else backend.value, artifact_dir),
         (action_path, state_path),
     )

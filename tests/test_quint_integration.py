@@ -1,14 +1,20 @@
 import os
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from shutil import which
-from typing import Literal
+from typing import override
 
 import pytest
 from quint_connect import (
     Action,
+    Backend,
+    DriverError,
+    DriverStage,
     NamedTest,
     QuintError,
     QuintMap,
+    QuintStage,
     QuintValue,
     Simulation,
     StateMismatchError,
@@ -17,7 +23,6 @@ from quint_connect import (
 )
 
 MODEL = Path(__file__).resolve().parents[1] / "examples" / "counter.qnt"
-Backend = Literal["rust", "typescript"]
 
 
 class Counter:
@@ -44,7 +49,7 @@ def quint_executable() -> str:
     return path
 
 
-@pytest.mark.parametrize("backend", ["rust", "typescript"])
+@pytest.mark.parametrize("backend", [Backend.RUST, Backend.TYPESCRIPT])
 def test_counter_matches_simulation(backend: Backend) -> None:
     config = Simulation(MODEL, max_steps=2)
 
@@ -61,7 +66,7 @@ def test_counter_matches_simulation(backend: Backend) -> None:
     assert result is None
 
 
-@pytest.mark.parametrize("backend", ["rust", "typescript"])
+@pytest.mark.parametrize("backend", [Backend.RUST, Backend.TYPESCRIPT])
 def test_counter_matches_named_test(backend: Backend) -> None:
     config = NamedTest(MODEL, test="roundTripTest", max_samples=1)
 
@@ -76,6 +81,82 @@ def test_counter_matches_named_test(backend: Backend) -> None:
     )
 
     assert result is None
+
+
+@pytest.mark.parametrize(
+    "stage", [DriverStage.FACTORY, DriverStage.APPLY, DriverStage.OBSERVE]
+)
+def test_generated_driver_failure_saves_a_replayable_trace(
+    tmp_path: Path, stage: DriverStage
+) -> None:
+    failure = RuntimeError(stage.value)
+
+    class FailingDriver(Counter):
+        @override
+        def step(self, action: Action, /) -> None:
+            if stage is DriverStage.APPLY:
+                raise failure
+            super().step(action)
+
+        @override
+        def observe(self) -> int:
+            if stage is DriverStage.OBSERVE:
+                raise failure
+            return super().observe()
+
+    def factory() -> FailingDriver:
+        if stage is DriverStage.FACTORY:
+            raise failure
+        return FailingDriver()
+
+    with pytest.raises(DriverError) as caught:
+        run(
+            Simulation(MODEL, max_steps=2),
+            factory,
+            quint=quint_executable(),
+            seed=42,
+            artifact_dir=tmp_path,
+            action_path=("op",),
+            state_path=("count",),
+        )
+
+    error = caught.value
+    assert error.seed == 42
+    assert error.stage is stage
+    assert error.__cause__ is failure
+    assert error.artifact_path is not None
+    assert error.artifact_path.is_file()
+    assert not error.trace_path.exists()
+    with pytest.raises(DriverError) as saved:
+        replay(error.artifact_path, factory, action_path=("op",), state_path=("count",))
+    assert saved.value.stage is stage
+    assert saved.value.step_index == error.step_index
+
+
+def test_generated_context_exit_failure_saves_the_trace(tmp_path: Path) -> None:
+    failure = RuntimeError("context exit failed")
+
+    @contextmanager
+    def driver_context() -> Generator[Counter]:
+        yield Counter()
+        raise failure
+
+    with pytest.raises(DriverError) as caught:
+        run(
+            Simulation(MODEL, max_steps=2),
+            driver_context=driver_context,
+            quint=quint_executable(),
+            seed=42,
+            artifact_dir=tmp_path,
+            action_path=("op",),
+            state_path=("count",),
+        )
+
+    error = caught.value
+    assert error.stage is DriverStage.EXIT
+    assert error.__cause__ is failure
+    assert error.artifact_path is not None
+    assert error.artifact_path.is_file()
 
 
 def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
@@ -157,7 +238,7 @@ class TicTacToe:
         return {"board": board, "nextTurn": {"tag": self.turn, "value": ()}}
 
 
-@pytest.mark.parametrize("backend", ["rust", "typescript"])
+@pytest.mark.parametrize("backend", [Backend.RUST, Backend.TYPESCRIPT])
 def test_pinned_upstream_tictactoe(backend: Backend) -> None:
     model = Path(__file__).with_name("fixtures") / "tictactoe.qnt"
     config = Simulation(model, max_steps=12)
@@ -215,7 +296,7 @@ def test_lookup_error_has_stable_process_attributes(
     with pytest.raises(QuintError) as caught:
         run(config, Counter, quint="quint", seed=42)
 
-    assert caught.value.stage == "lookup"
+    assert caught.value.stage is QuintStage.LOOKUP
     assert caught.value.executable == Path("quint")
     assert caught.value.stdout == caught.value.stderr == b""
     assert caught.value.exit_code is None

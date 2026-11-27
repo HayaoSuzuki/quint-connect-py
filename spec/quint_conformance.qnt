@@ -321,6 +321,22 @@ module quint_conformance {
       .then(respond(DriverApply(OperationApplied)))
       .then(respond(DriverObserve(Observed(integerDigit(1)))))
 
+  run generatedDriverFailureSavedTest =
+    initialize(generatedRequest(simulationWithCount(1), itemsSelection))
+      .then(respond(ChildStarted))
+      .then(respond(ChildSucceeded(List(firstFile))))
+      .then(respond(DirectoryListing(ListingSucceeded)))
+      .then(respond(GeneratedRead(ReadSucceeded)))
+      .then(respond(DriverFactory(FactorySucceeded(1))))
+      .then(respond(DriverApply(OperationFailed("driver failed"))))
+      .then(respond(ArtifactCandidateList(List(7))))
+      .then(respond(ArtifactReservation(StorageSucceeded)))
+      .then(respond(EvidenceCopyStarted))
+      .then(respond(EvidenceCopyWritten(originalBytes.length())))
+      .then(respond(EvidenceCopyFinished(StorageSucceeded)))
+      .then(respond(removedWorkspace))
+      .expect(completedFixture)
+
   run generatedMismatchSavedTest =
     reachGeneratedMismatch
       .then(respond(ArtifactCandidateList(List(7))))

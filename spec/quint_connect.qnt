@@ -190,6 +190,8 @@ module quint_connect {
     actual: Value,
   }
 
+  type EvidenceFailure = MismatchEvidence(Mismatch) | DriverEvidence(DriverErrorDetail)
+
   type ArtifactDirectoryProblem = { root: str, directory: int, cause: str }
   type SaveResult = ArtifactSaved(fs::FilePath) | ArtifactDirectoryFailed(ArtifactDirectoryProblem) | ArtifactSaveFailed(str)
   type ArtifactPreparation = ArtifactUnplanned | ArtifactCandidates(List[int]) | ArtifactReadyToCopy
@@ -226,6 +228,7 @@ module quint_connect {
     | IncompleteGeneration({ seed: Seed, requested: int, produced: int })
     | TraceFailed(TraceError)
     | DriverFailed(DriverErrorDetail)
+    | GeneratedDriverFailed({ position: TracePosition, detail: DriverErrorDetail, artifacts: Artifacts })
     | StatesDiffer({ detail: Mismatch, artifacts: Artifacts })
 
   type CleanupNote = NoCleanupError | CleanupAlsoFailed(str) | CleanupDeferred({ workspace: WorkspaceId, cause: str })
@@ -242,7 +245,7 @@ module quint_connect {
     | AwaitingDriver(ValidatedTrace)
     | AwaitingOperation(ActiveTrace)
     | AwaitingObservation(ActiveTrace)
-    | AwaitingArtifact({ generation: Generation, detail: Mismatch, preparation: ArtifactPreparation })
+    | AwaitingArtifact({ generation: Generation, position: TracePosition, detail: EvidenceFailure, preparation: ArtifactPreparation })
     | AwaitingCleanup({ generation: Generation, result: Outcome })
     | Finished(Outcome)
 
@@ -271,6 +274,7 @@ module quint_connect {
     | ObservationCalled({ context: DriverStep, expected: Value })
     | ObservationMatched({ position: StepPosition, actual: Value })
     | DifferenceObserved(Mismatch)
+    | DriverFailureObserved({ position: TracePosition, detail: DriverErrorDetail })
     | ArtifactDirectoryTried({ root: str, directory: int, result: DirectoryAttempt })
     | SaveAttempted({ position: TracePosition, result: SaveResult })
     | CleanupAttempted({ workspace: WorkspaceId, result: StorageResult })
@@ -433,6 +437,17 @@ module quint_connect {
       | _ => true
     }
 
+  pure def onDriverFailure(s: CallState, batch: TraceBatch, detail: DriverErrorDetail): CallState =
+    match batch.source {
+      | GeneratedItf(g) => {
+        val position = tracePosition(batch)
+        recordEvent(s,
+          AwaitingArtifact({ generation: g, position: position, detail: DriverEvidence(detail), preparation: ArtifactUnplanned }),
+          DriverFailureObserved({ position: position, detail: detail }))
+      }
+      | _ => stop(s, batch.source, DriverFailed(detail))
+    }
+
   pure def onFactory(s: CallState, validated: ValidatedTrace, result: FactoryResult): CallState = {
     val position = tracePosition(validated.batch)
     val recorded = recordEvent(s, s.phase, FactoryCalled(position))
@@ -443,9 +458,9 @@ module quint_connect {
           DriverCreated({ trace: position, driver: driver })
         )
       | FactoryFailed(cause) =>
-        stop(recorded, validated.batch.source, DriverFailed({
+        onDriverFailure(recorded, validated.batch, {
           location: errorLocation(validated.batch, InvalidFile), stage: Factory, cause: cause,
-        }))
+        })
     }
   }
 
@@ -470,9 +485,9 @@ module quint_connect {
     match result {
       | OperationApplied => { ...recorded, phase: AwaitingObservation(active) }
       | OperationFailed(cause) =>
-        stop(recorded, active.validated.batch.source, DriverFailed({
+        onDriverFailure(recorded, active.validated.batch, {
           location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Apply, cause: cause,
-        }))
+        })
     }
   }
 
@@ -495,7 +510,7 @@ module quint_connect {
       | SavedPaths(paths) => stop(recorded, source, StatesDiffer({
           detail: detail, artifacts: FromSavedFile(paths.nth(detail.position.trace.traceIndex).requested),
         }))
-      | GeneratedItf(g) => { ...recorded, phase: AwaitingArtifact({ generation: g, detail: detail, preparation: ArtifactUnplanned }) }
+      | GeneratedItf(g) => { ...recorded, phase: AwaitingArtifact({ generation: g, position: detail.position.trace, detail: MismatchEvidence(detail), preparation: ArtifactUnplanned }) }
     }
   }
 
@@ -508,9 +523,9 @@ module quint_connect {
       | Observed(actual) =>
         match qv::prepareObservableValue(actual) {
           | InvalidObservableValue =>
-            stop(recorded, source, DriverFailed({
+            onDriverFailure(recorded, active.validated.batch, {
               location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Observe, cause: "invalid driver observation",
-            }))
+            })
           | NormalizedObservableValue(normalized) =>
             if (qv::equalValues(stepData.expected, normalized))
               afterMatch(recordEvent(recorded, recorded.phase, ObservationMatched({ position: context.position, actual: normalized })), active)
@@ -518,18 +533,20 @@ module quint_connect {
               onMismatch(recorded, source, { position: context.position, step: stepData, actual: normalized })
         }
       | ObservationFailed(cause) =>
-        stop(recorded, source, DriverFailed({
+        onDriverFailure(recorded, active.validated.batch, {
           location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Observe, cause: cause,
-        }))
+        })
     }
   }
 
-  pure def onArtifact(s: CallState, g: Generation, detail: Mismatch, save: SaveResult): CallState = {
-    val recorded = recordEvent(s, s.phase, SaveAttempted({ position: detail.position.trace, result: save }))
-    stop(recorded, GeneratedItf(g), StatesDiffer({
-      detail: detail,
-      artifacts: FromGeneration({ seed: g.seed, save: save }),
-    }))
+  pure def onArtifact(s: CallState, g: Generation, position: TracePosition, detail: EvidenceFailure, save: SaveResult): CallState = {
+    val recorded = recordEvent(s, s.phase, SaveAttempted({ position: position, result: save }))
+    val artifacts = FromGeneration({ seed: g.seed, save: save })
+    val failure = match detail {
+      | MismatchEvidence(mismatch) => StatesDiffer({ detail: mismatch, artifacts: artifacts })
+      | DriverEvidence(driver) => GeneratedDriverFailed({ position: position, detail: driver, artifacts: artifacts })
+    }
+    stop(recorded, GeneratedItf(g), failure)
   }
 
   pure def onCleanup(s: CallState, g: Generation, primary: Outcome, result: StorageResult): CallState = {
@@ -1114,7 +1131,7 @@ module quint_connect {
                   ...ctx, preparation: ArtifactCandidates(remaining),
                 }) })
               else
-                changeCall(id, onArtifact(recorded, ctx.generation, ctx.detail, ArtifactDirectoryFailed({
+                changeCall(id, onArtifact(recorded, ctx.generation, ctx.position, ctx.detail, ArtifactDirectoryFailed({
                   root: root, directory: directory, cause: "artifact directory already exists",
                 })))
             } else
@@ -1131,7 +1148,7 @@ module quint_connect {
                   val recorded = recordEvent(current, current.phase, ArtifactDirectoryTried({
                     root: root, directory: directory, result: DirectoryRejected(cause),
                   }))
-                  changeCall(id, onArtifact(recorded, ctx.generation, ctx.detail,
+                  changeCall(id, onArtifact(recorded, ctx.generation, ctx.position, ctx.detail,
                     ArtifactDirectoryFailed({ root: root, directory: directory, cause: cause })))
                 }
               }
@@ -1145,7 +1162,7 @@ module quint_connect {
     match calls.get(id).phase {
       | AwaitingArtifact(ctx) => {
         val workspace = ctx.generation.workspace
-        val trace = ctx.detail.position.trace.trace
+        val trace = ctx.position.trace
         all {
           ctx.preparation == ArtifactReadyToCopy,
           fs::canStageReservedEvidence(filesystem, workspace, trace),
@@ -1179,10 +1196,10 @@ module quint_connect {
           | StorageSucceeded =>
             match filesystem.workspaces.get(workspace).artifactDirectory {
               | ArtifactDirectoryReserved(directory) => {
-                val saved = fs::evidencePath(ctx.generation.artifactRoot, directory, ctx.detail.position.trace.trace)
+                val saved = fs::evidencePath(ctx.generation.artifactRoot, directory, ctx.position.trace)
                 all {
                   fs::canPublishEvidence(filesystem, workspace),
-                  changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.detail, ArtifactSaved(saved)),
+                  changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.position, ctx.detail, ArtifactSaved(saved)),
                     fs::publishEvidence(filesystem, workspace)),
                 }
               }
@@ -1190,7 +1207,7 @@ module quint_connect {
             }
           | StorageFailed(cause) => all {
               fs::canAbandonEvidence(filesystem, workspace),
-              changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.detail, ArtifactSaveFailed(cause)),
+              changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.position, ctx.detail, ArtifactSaveFailed(cause)),
                 fs::abandonEvidence(filesystem, workspace)),
             }
         }
@@ -1209,7 +1226,7 @@ module quint_connect {
     match calls.get(id).phase {
       | AwaitingArtifact(ctx) => {
         val workspace = ctx.generation.workspace
-        val trace = ctx.detail.position.trace.trace
+        val trace = ctx.position.trace
         val save = match result {
           | StorageSucceeded => ArtifactSaved(fs::evidencePath(ctx.generation.artifactRoot, workspace, trace))
           | StorageFailed(cause) => ArtifactSaveFailed(cause)
@@ -1218,7 +1235,7 @@ module quint_connect {
           ctx.preparation == ArtifactUnplanned,
           copyAgrees(result, copy),
           fs::canRetainTraceFile(filesystem, workspace, trace, copy),
-          changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.detail, save),
+          changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.position, ctx.detail, save),
             fs::retainTraceFile(filesystem, workspace, trace, copy)),
         }
       }
@@ -1476,6 +1493,7 @@ module quint_connect {
   pure def stopped(event: Event): bool =
     match event {
       | DifferenceObserved(_) => true
+      | DriverFailureObserved(_) => true
       | FailureRecognized(_) => true
       | Returned(_) => true
       | _ => false
@@ -1509,7 +1527,7 @@ module quint_connect {
       }
     )
 
-  pure def artifactMatchesMismatch(history: List[Event], index: int, mismatch: Mismatch, artifact: Artifacts): bool =
+  pure def artifactMatchesTrace(history: List[Event], index: int, position: TracePosition, artifact: Artifacts): bool =
     match artifact {
       | FromSavedTrace =>
         hasPrior(history, index, event =>
@@ -1519,13 +1537,13 @@ module quint_connect {
           }
         )
       | FromSavedFile(path) =>
-        requestedSavedPath(history, index, { path: path, position: mismatch.position.trace }) and
-          hasPrior(history, index, event => event == SavedReadAttempted({ path: path, position: mismatch.position.trace }))
+        requestedSavedPath(history, index, { path: path, position: position }) and
+          hasPrior(history, index, event => event == SavedReadAttempted({ path: path, position: position }))
       | FromGeneration(detail) =>
         previousIs(history, index, event =>
           match event {
             | SaveAttempted(attempt) =>
-              attempt.position == mismatch.position.trace and
+              attempt.position == position and
                 hasPrior(history, index, prior =>
                   match prior {
                     | GenerationCompleted(completed) =>
@@ -1545,6 +1563,7 @@ module quint_connect {
         hasPrior(history, index, event =>
           match event {
             | DifferenceObserved(_) => true
+            | DriverFailureObserved(_) => true
             | _ => false
           }
         )
@@ -1552,6 +1571,7 @@ module quint_connect {
         hasPrior(history, index, event =>
           match event {
             | DifferenceObserved(detail) => detail.position.trace == attempt.position
+            | DriverFailureObserved(failure) => failure.position == attempt.position
             | _ => false
           }
         ) and hasPrior(history, index, prior =>
@@ -1564,7 +1584,10 @@ module quint_connect {
         match error {
           | StatesDiffer(mismatch) =>
             hasPrior(history, index, event => event == DifferenceObserved(mismatch.detail)) and
-            artifactMatchesMismatch(history, index, mismatch.detail, mismatch.artifacts)
+            artifactMatchesTrace(history, index, mismatch.detail.position.trace, mismatch.artifacts)
+          | GeneratedDriverFailed(failure) =>
+            hasPrior(history, index, event => event == DriverFailureObserved({ position: failure.position, detail: failure.detail })) and
+            artifactMatchesTrace(history, index, failure.position, failure.artifacts)
           | _ => true
         }
       | _ => true
@@ -1878,7 +1901,7 @@ module quint_connect {
       | StagedEvidence(staged) =>
         match calls.get(storage.owner).phase {
           | AwaitingArtifact(ctx) =>
-            ctx.generation.workspace == workspace and ctx.detail.position.trace.trace == staged.trace
+            ctx.generation.workspace == workspace and ctx.position.trace == staged.trace
           | _ => false
         }
       | _ => true
@@ -1966,7 +1989,7 @@ module quint_connect {
           | ArtifactUnplanned => true
           | ArtifactCandidates(candidates) => candidates.length() > 0
           | ArtifactReadyToCopy =>
-            fs::canStageReservedEvidence(filesystem, ctx.generation.workspace, ctx.detail.position.trace.trace) or
+            fs::canStageReservedEvidence(filesystem, ctx.generation.workspace, ctx.position.trace) or
               fs::canAbandonEvidence(filesystem, ctx.generation.workspace)
         }
       | AwaitingCleanup(ctx) =>
@@ -2089,7 +2112,7 @@ module quint_connect {
   action copySampledBytes(id: CallId): bool =
     match calls.get(id).phase {
       | AwaitingArtifact(ctx) => {
-        val path = fs::workingPath(ctx.generation.workspace, ctx.detail.position.trace.trace)
+        val path = fs::workingPath(ctx.generation.workspace, ctx.position.trace)
         nondet count = Set(1, filesystem.files.get(path).length()).oneOf()
         writeArtifactCopy(id, count)
       }

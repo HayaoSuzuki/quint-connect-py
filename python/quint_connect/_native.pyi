@@ -1,12 +1,14 @@
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from os import PathLike
 from pathlib import Path
-from typing import Literal
 
 from . import Action, Driver, QuintValue
+from ._enums import DriverStage, QuintStage, WorkspaceStage
 
 type _Path = str | PathLike[str]
 type _Selection = tuple[Sequence[str], Sequence[str]]
+type _DriverSetup = tuple[Callable[[], Driver | AbstractContextManager[Driver]], bool]
 
 class InvalidTraceError(Exception):
     trace_path: Path
@@ -23,7 +25,15 @@ class DriverError(Exception):
     trace_path: Path
     trace_index: int
     step_index: int | None
-    stage: Literal["factory", "apply", "observe"]
+    stage: DriverStage
+    seed: int | None
+    artifact_path: Path | None
+    artifact_error: OSError | None
+    artifact_candidate: Path | None
+    cleanup_error: OSError | None
+    cleanup_deferred: bool
+    workspace: Path | None
+    driver_cleanup_error: BaseException | None
 
 class StateMismatchError(AssertionError):
     trace_path: Path
@@ -39,10 +49,11 @@ class StateMismatchError(AssertionError):
     cleanup_error: OSError | None
     cleanup_deferred: bool
     workspace: Path | None
+    driver_cleanup_error: BaseException | None
 
 class QuintError(Exception):
     seed: int | None
-    stage: str
+    stage: QuintStage
     exit_code: int | None
     signal: int | None
     stdout: bytes
@@ -54,7 +65,7 @@ class QuintError(Exception):
 
 class WorkspaceError(Exception):
     seed: int | None
-    stage: str
+    stage: WorkspaceStage
     cleanup_error: OSError | None
     cleanup_deferred: bool
     workspace: Path | None
@@ -66,7 +77,7 @@ class IncompleteGenerationError(Exception):
 
 def replay(
     paths: Sequence[_Path],
-    driver_factory: Callable[[], Driver],
+    driver_setup: _DriverSetup,
     selection: _Selection,
     /,
 ) -> None: ...
@@ -74,7 +85,7 @@ def run(
     common: tuple[_Path, str | None, int | None],
     named_test: str | None,
     simulation: tuple[str | None, str | None, int, int | None] | None,
-    driver_factory: Callable[[], Driver],
+    driver_setup: _DriverSetup,
     execution: tuple[_Path, int | None, str | None, _Path | None],
     selection: _Selection,
     /,

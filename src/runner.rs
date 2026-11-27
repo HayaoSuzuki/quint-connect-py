@@ -204,9 +204,9 @@ pub fn run_from<E: RunEnvironment>(
         if matches!(error.cleanup, Some(Cleanup::Deferred { .. })) {
             return result;
         }
-        if let Failure::Replay(ReplayError::Mismatch(mismatch)) = &error.failure {
-            let saved = save_evidence(environment, &root, &mismatch.trace, &mismatch.bytes);
-            environment.run_event(RunEvent::ArtifactSaved(&mismatch.trace, &saved));
+        if let Failure::Replay(ReplayError::FailedTrace(trace)) = &error.failure {
+            let saved = save_evidence(environment, &root, &trace.trace, &trace.bytes);
+            environment.run_event(RunEvent::ArtifactSaved(&trace.trace, &saved));
             error.artifact = Some(saved);
         }
     }

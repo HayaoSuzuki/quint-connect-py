@@ -11,7 +11,7 @@ use serde_json::{Value as Json, json};
 use crate::itf::{Action, Selection, fixture_value};
 use crate::replay::{
     Driver, DriverStage, Mismatch, ReplayEnvironment, ReplayError, ReplayEvent, TraceCause,
-    TraceFile, replay, saved_files,
+    TraceFile, TraceProblem, replay, saved_files,
 };
 use crate::value::Value;
 
@@ -241,9 +241,18 @@ impl ReplayEnvironment for SavedReplay {
     }
 }
 
-fn mismatch_json(mismatch: &Mismatch) -> Json {
+fn driver_stage(stage: DriverStage) -> Json {
+    unit(match stage {
+        DriverStage::Factory => "Factory",
+        DriverStage::Apply => "Apply",
+        DriverStage::Observe => "Observe",
+        DriverStage::Exit => "Exit",
+    })
+}
+
+fn mismatch_json(trace: &TraceFile, mismatch: &Mismatch) -> Json {
     json!({
-        "position": step_position(&mismatch.trace, mismatch.step_index),
+        "position": step_position(trace, mismatch.step_index),
         "step": {"operation": action_json(&mismatch.step.action), "expected": value_json(&mismatch.step.expected)},
         "actual": value_json(&mismatch.actual),
     })
@@ -270,28 +279,22 @@ fn outcome(result: Result<(), ReplayError<String>>) -> Json {
                 json!({"location": location(&trace, step), "cause": cause}),
             )
         }
-        Err(ReplayError::Driver {
-            trace,
-            step,
-            stage,
-            cause,
-        }) => {
-            let stage = match stage {
-                DriverStage::Factory => "Factory",
-                DriverStage::Apply => "Apply",
-                DriverStage::Observe => "Observe",
-            };
-            tagged(
-                "DriverFailed",
-                json!({"location": location(&trace, step), "stage": unit(stage), "cause": *cause}),
-            )
+        Err(ReplayError::FailedTrace(failure)) => {
+            assert!(failure.driver_cleanup.is_none());
+            match failure.problem {
+                TraceProblem::Driver { step, stage, cause } => tagged(
+                    "DriverFailed",
+                    json!({"location": location(&failure.trace, step), "stage": driver_stage(stage), "cause": *cause}),
+                ),
+                TraceProblem::Mismatch(mismatch) => tagged(
+                    "StatesDiffer",
+                    json!({
+                        "detail": mismatch_json(&failure.trace, &mismatch),
+                        "artifacts": tagged("FromSavedFile", path(&failure.trace)),
+                    }),
+                ),
+            }
         }
-        Err(ReplayError::Mismatch(mismatch)) => tagged(
-            "StatesDiffer",
-            json!({
-                "detail": mismatch_json(&mismatch), "artifacts": tagged("FromSavedFile", path(&mismatch.trace)),
-            }),
-        ),
     };
     tagged(
         "Failed",

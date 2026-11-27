@@ -1,5 +1,7 @@
 import json
 import tempfile
+from collections.abc import Generator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import override
 
@@ -9,6 +11,7 @@ from hypothesis import strategies as st
 from quint_connect import (
     Action,
     DriverError,
+    DriverStage,
     EmptyTraceError,
     InvalidTraceError,
     QuintValue,
@@ -91,33 +94,132 @@ def test_driver_mutation_does_not_change_mismatch_arguments(tmp_path: Path) -> N
     assert caught.value.actual is False
 
 
-@pytest.mark.parametrize("stage", ["factory", "apply", "observe"])
-def test_driver_failure_keeps_original_exception(tmp_path: Path, stage: str) -> None:
+@pytest.mark.parametrize(
+    "stage", [DriverStage.FACTORY, DriverStage.APPLY, DriverStage.OBSERVE]
+)
+def test_driver_failure_keeps_original_exception(
+    tmp_path: Path, stage: DriverStage
+) -> None:
     path = write_trace(tmp_path / "trace.itf.json", [state(True)])
-    original = RuntimeError(stage)
+    original = RuntimeError(stage.value)
 
     class FailingDriver(ConstantDriver):
         @override
         def step(self, _action: Action, /) -> None:
-            if stage == "apply":
+            if stage is DriverStage.APPLY:
                 raise original
 
         @override
         def observe(self) -> QuintValue:
-            if stage == "observe":
+            if stage is DriverStage.OBSERVE:
                 raise original
             return True
 
     def factory() -> ConstantDriver:
-        if stage == "factory":
+        if stage is DriverStage.FACTORY:
             raise original
         return FailingDriver(True)
 
     with pytest.raises(DriverError) as caught:
         replay(path, factory, state_path=("state",))
 
-    assert caught.value.stage == stage
+    assert caught.value.stage is stage
     assert caught.value.__cause__ is original
+    assert caught.value.seed is None
+    assert caught.value.artifact_path is None
+
+
+def test_context_exits_before_the_next_trace(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    events: list[str] = []
+
+    @contextmanager
+    def driver_context() -> Generator[ConstantDriver]:
+        events.append("enter")
+        try:
+            yield ConstantDriver(True)
+        finally:
+            events.append("exit")
+
+    replay([path, path], driver_context=driver_context, state_path=("state",))
+
+    assert events == ["enter", "exit", "enter", "exit"]
+
+
+def test_context_receives_driver_failure(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    failure = RuntimeError("driver failed")
+    received: list[RuntimeError] = []
+
+    class FailingDriver(ConstantDriver):
+        @override
+        def step(self, _action: Action, /) -> None:
+            raise failure
+
+    @contextmanager
+    def driver_context() -> Generator[ConstantDriver]:
+        try:
+            yield FailingDriver(True)
+        except RuntimeError as error:
+            received.append(error)
+            raise
+
+    with pytest.raises(DriverError) as caught:
+        replay(path, driver_context=driver_context, state_path=("state",))
+
+    assert received == [failure]
+    assert caught.value.__cause__ is failure
+
+
+def test_context_exit_cannot_suppress_a_mismatch(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+
+    @contextmanager
+    def driver_context() -> Generator[ConstantDriver]:
+        with suppress(StateMismatchError):
+            yield ConstantDriver(False)
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, driver_context=driver_context, state_path=("state",))
+
+    assert caught.value.actual is False
+
+
+def test_context_exit_failure_preserves_the_mismatch(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    failure = RuntimeError("context exit failed")
+
+    @contextmanager
+    def driver_context() -> Generator[ConstantDriver]:
+        try:
+            yield ConstantDriver(False)
+        finally:
+            raise failure
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, driver_context=driver_context, state_path=("state",))
+
+    assert caught.value.actual is False
+    assert caught.value.driver_cleanup_error is failure
+
+
+def test_context_exit_failure_is_reported_after_a_passing_trace(
+    tmp_path: Path,
+) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    failure = RuntimeError("context exit failed")
+
+    @contextmanager
+    def driver_context() -> Generator[ConstantDriver]:
+        yield ConstantDriver(True)
+        raise failure
+
+    with pytest.raises(DriverError) as caught:
+        replay(path, driver_context=driver_context, state_path=("state",))
+
+    assert caught.value.stage is DriverStage.EXIT
+    assert caught.value.step_index is None
+    assert caught.value.__cause__ is failure
 
 
 def test_deep_selected_value_survives_decode_conversion_and_comparison(
