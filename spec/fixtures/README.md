@@ -14,6 +14,8 @@ python3 tools/export_quint_fixtures.py
 python3 tools/export_quint_fixtures.py --check
 ```
 
+Rust 実装の15ケースは `cargo test --lib conformance` で実行する。各関数は一つのケースを読み、その応答を本番のランナーに渡す。生成と再生の呼び出し履歴、例外の元となる診断、保存ファイルと残存ファイルを JSON と照合する。
+
 ## アダプターの入出力
 
 検証スクリプトはケースごとにアダプターを起動し、標準入力に JSON オブジェクトを一つ渡す。
