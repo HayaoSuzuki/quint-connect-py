@@ -49,9 +49,12 @@ module quint_connect {
     artifactRoot: str,
   }
 
+  type SavedAccess = ReadAt(fs::FilePath) | NoSuchSavedPath
+  type SavedInput = { requested: fs::FilePath, access: SavedAccess }
+
   type Source =
     | SavedItf
-    | SavedPaths(List[fs::FilePath])
+    | SavedPaths(List[SavedInput])
     | GeneratedItf(Generation)
 
   type TracePosition = {
@@ -319,7 +322,8 @@ module quint_connect {
 
   pure def onReplay(s: CallState, source: Source, traces: List[TraceId]): CallState = {
     val request = match source {
-      | SavedPaths(paths) => ReplayFilesRequested(paths)
+      | SavedPaths(paths) =>
+        ReplayFilesRequested(paths.foldl(List(), (requested, path) => requested.append(path.requested)))
       | _ => ReplayRequested(traces)
     }
     val recorded = recordEvent(s, s.phase, request)
@@ -385,7 +389,7 @@ module quint_connect {
     val position = tracePosition(batch)
     match batch.source {
       | SavedPaths(paths) => {
-        val path = paths.nth(batch.traceIndex)
+        val path = paths.nth(batch.traceIndex).requested
         match location {
           | InvalidFile => AtSavedTrace({ path: path, position: position })
           | InvalidStep(index) =>
@@ -402,7 +406,7 @@ module quint_connect {
 
   pure def emptyTraceInput(batch: TraceBatch): EmptyInput =
     match batch.source {
-      | SavedPaths(paths) => NoSavedTraceStates({ path: paths.nth(batch.traceIndex), position: tracePosition(batch) })
+      | SavedPaths(paths) => NoSavedTraceStates({ path: paths.nth(batch.traceIndex).requested, position: tracePosition(batch) })
       | _ => NoTraceStates(tracePosition(batch))
     }
 
@@ -489,7 +493,7 @@ module quint_connect {
     match source {
       | SavedItf => stop(recorded, source, StatesDiffer({ detail: detail, artifacts: FromSavedTrace }))
       | SavedPaths(paths) => stop(recorded, source, StatesDiffer({
-          detail: detail, artifacts: FromSavedFile(paths.nth(detail.position.trace.traceIndex)),
+          detail: detail, artifacts: FromSavedFile(paths.nth(detail.position.trace.traceIndex).requested),
         }))
       | GeneratedItf(g) => { ...recorded, phase: AwaitingArtifact({ generation: g, detail: detail, preparation: ArtifactUnplanned }) }
     }
@@ -575,19 +579,44 @@ module quint_connect {
   action startReplay(id: CallId, traces: List[TraceId]): bool =
     startReplayWithSelection(id, traces, defaultSelection)
 
-  // Replay accepts caller files and published artifact paths, including paths that do not yet exist.
-  action startReplayPaths(id: CallId, paths: List[fs::FilePath], selection: itf::Selection): bool = all {
+  action startSavedInputs(id: CallId, inputs: List[SavedInput], selection: itf::Selection): bool = all {
     calls.get(id).phase == Ready,
-    paths.indices().forall(i =>
-      match paths.nth(i) {
-        | WorkingFile(_) => false
-        | _ => true
+    inputs.indices().forall(i =>
+      match inputs.nth(i).access {
+        | ReadAt(path) =>
+          match path { | WorkingFile(_) => false | _ => true }
+        | NoSuchSavedPath => true
       }
     ),
     changeCall(id, onReplay(
-      { ...calls.get(id), selection: selection }, SavedPaths(paths), range(0, paths.length())
+      { ...calls.get(id), selection: selection }, SavedPaths(inputs), range(0, inputs.length())
     )),
   }
+
+  // These paths already identify filesystem entries, including future artifacts.
+  action startReplayPaths(id: CallId, paths: List[fs::FilePath], selection: itf::Selection): bool =
+    startSavedInputs(id, paths.foldl(List(), (inputs, path) =>
+      inputs.append({ requested: path, access: ReadAt(path) })), selection)
+
+  // Bind the caller's spelling to the filesystem entry reached from its cwd.
+  // Lookup supplies path identities, including alias names and unpublished artifacts.
+  pure def resolveSavedInput(
+    directory: str, path: cli::InputPath, lookup: cli::ResolvedPath -> fs::FilePath
+  ): SavedInput = {
+    val resolved = cli::resolvePath(directory, path)
+    val spelling = match path { | AbsolutePath(value) => value | RelativePath(value) => value }
+    {
+      requested: fs::SavedFile(spelling),
+      access: if (lookup.keys().contains(resolved)) ReadAt(lookup.get(resolved)) else NoSuchSavedPath,
+    }
+  }
+
+  action startReplayFromCaller(
+    id: CallId, directory: str, paths: List[cli::InputPath], lookup: cli::ResolvedPath -> fs::FilePath,
+    selection: itf::Selection
+  ): bool =
+    startSavedInputs(id, paths.foldl(List(), (inputs, path) =>
+      inputs.append(resolveSavedInput(directory, path, lookup))), selection)
 
   action reserveRun(id: CallId, g: Generation, requestState: CallState): bool = all {
     calls.get(id).phase == Ready,
@@ -689,6 +718,16 @@ module quint_connect {
     id: CallId, request: cli::CliRequest, drawnSeed: Seed, artifactRoot: str, selection: itf::Selection
   ): bool =
     startRequestedRunWithPath(id, request, drawnSeed, artifactRoot, selection, { directories: List(), observations: Map() })
+
+  action startRunWithArtifactParent(
+    id: CallId, request: cli::CliRequest, drawnSeed: Seed, parent: cli::CliOption[cli::InputPath],
+    systemTempDirectory: str, pathIdentities: cli::ResolvedPath -> str, selection: itf::Selection
+  ): bool = {
+    val path = cli::artifactParent(request.callerDirectory, parent, systemTempDirectory)
+    if (pathIdentities.keys().contains(path))
+      startRequestedRun(id, request, drawnSeed, pathIdentities.get(path), selection)
+    else inapplicable
+  }
 
   action startProcess(id: CallId): bool =
     match calls.get(id).phase {
@@ -959,11 +998,15 @@ module quint_connect {
         match batch.source {
           | SavedPaths(paths) => {
             val current = calls.get(id)
-            val path = paths.nth(batch.traceIndex)
+            val input = paths.nth(batch.traceIndex)
             val recorded = recordEvent(current, current.phase, SavedReadAttempted({
-              path: path, position: tracePosition(batch),
+              path: input.requested, position: tracePosition(batch),
             }))
-            changeCall(id, onValidation(recorded, batch, validateSavedFile(filesystem, path, result, current.selection)))
+            val validated = match input.access {
+              | ReadAt(path) => validateSavedFile(filesystem, path, result, current.selection)
+              | NoSuchSavedPath => InvalidItf({ location: InvalidFile, cause: "file not found" })
+            }
+            changeCall(id, onValidation(recorded, batch, validated))
           }
           | _ => inapplicable
         }

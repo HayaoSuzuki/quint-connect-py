@@ -42,6 +42,19 @@ module quint_artifact_directory_test {
       }
     )
 
+  run artifactParentUsesCallerDirectoryOrSystemDefaultTest = {
+    val explicit = cli::CliSpecified(cli::RelativePath("../artifacts"))
+    val configured = cli::AnchoredPath({ directory: "/caller", path: "../artifacts" })
+    val fallback = cli::AbsoluteTarget("/system-temp")
+    val folders = Map(configured -> root, fallback -> occupiedRoot)
+    val first = { ...simulatorRequest(1, simulationWithCount(1)), callerDirectory: "/caller" }
+    val second = { ...simulatorRequest(2, simulationWithCount(1)), callerDirectory: "/other" }
+    init
+      .then(startRunWithArtifactParent(1, first, sampleSeed, explicit, "/system-temp", folders, itemsSelection))
+      .then(startRunWithArtifactParent(2, second, sampleSeed, cli::CliDefault, "/system-temp", folders, itemsSelection))
+      .expect(filesystem.workspaces.get(1).root == root and filesystem.workspaces.get(2).root == occupiedRoot and safety)
+  }
+
   run preexistingArtifactSurvivesReservationCollisionTest = {
     val earlier = fs::evidencePath(occupiedRoot, firstDirectory, 2)
     val later = fs::evidencePath(occupiedRoot, secondDirectory, 2)

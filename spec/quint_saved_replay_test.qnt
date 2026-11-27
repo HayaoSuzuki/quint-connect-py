@@ -1,4 +1,5 @@
 module quint_saved_replay_test {
+  import quint_cli as cli from "./quint_cli"
   import quint_connect_documents.* from "./quint_connect"
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2),
@@ -11,6 +12,34 @@ module quint_saved_replay_test {
 
   def pathWasOpened(path: fs::FilePath, position: TracePosition): bool =
     hasEvent(calls.get(1).history, event => event == SavedReadAttempted({ path: path, position: position }))
+
+  run relativePathsUseEachCallersDirectoryAndKeepOriginalSpellingTest = {
+    val relative = cli::RelativePath("traces/../same.itf.json")
+    val absolute = cli::AbsolutePath("/shared/good.itf.json")
+    val requested = fs::SavedFile("traces/../same.itf.json")
+    val paths = Map(
+      cli::resolvePath("/first", relative) -> fs::SavedFile("alias.itf.json"),
+      cli::resolvePath("/second", relative) -> fs::SavedFile("bad.itf.json"),
+      cli::AbsoluteTarget("/shared/good.itf.json") -> fs::SavedFile("good.itf.json"),
+    )
+    init
+      .then(startReplayFromCaller(1, "/first", List(relative, absolute), paths, itemsSelection))
+      .then(startReplayFromCaller(2, "/second", List(relative), paths, itemsSelection))
+      .then(readSavedPath(2, ReadSucceeded))
+      .expect(calls.get(2).phase == Finished(failed(TraceFailed({
+        location: AtSavedTrace({ path: requested, position: firstPosition }), cause: "invalid JSON",
+      }))) and safety)
+      .then(readSavedPath(1, ReadSucceeded))
+      .expect(pathWasOpened(requested, firstPosition))
+      .then(createDriver(1, FactorySucceeded(1)))
+      .then(applyOperation(1, OperationApplied))
+      .then(observeState(1, Observed(itemSet)))
+      .then(readSavedPath(1, ReadSucceeded))
+      .then(createDriver(1, FactorySucceeded(2)))
+      .then(applyOperation(1, OperationApplied))
+      .then(observeState(1, Observed(itemSet)))
+      .expect(finishedAs(Passed) and pathWasOpened(fs::SavedFile("/shared/good.itf.json"), secondPosition) and safety)
+  }
 
   run distinctAliasPathReadsTheSameTraceWithFreshDriversTest =
     init

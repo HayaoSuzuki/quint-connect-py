@@ -148,6 +148,9 @@ module quint_cli {
       | RelativePath(value) => AnchoredPath({ directory: directory, path: value })
     }
 
+  pure def artifactParent(directory: str, configured: CliOption[InputPath], systemTempDirectory: str): ResolvedPath =
+    resolvePath(directory, optionOr(configured, AbsolutePath(systemTempDirectory)))
+
   // The reserved workspace is the child cwd. The template only contains a basename.
   pure def quintCommand(request: CliRequest, osSeed: SeedDigits): CommandResult = {
     val seed = optionOr(request.seed, osSeed)
