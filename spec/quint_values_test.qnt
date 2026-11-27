@@ -147,4 +147,86 @@ module quint_values_test {
     not(isUsable(atom(RecordNode(Map("missing" -> 10))))),
     not(isUsable({ nodes: List(BooleanNode(true), MapNode(List((0, 10)))), root: 1 })),
   }
+
+  pure def permutations(arity: int): Set[List[int]] =
+    range(0, arity).foldl(Set(List()), (orders, index) =>
+      orders.fold(Set(), (extended, order) =>
+        extended.union(0.to(order.length()).map(position =>
+          order.slice(0, position).append(index).concat(order.slice(position, order.length()))))))
+
+  type CollectionKind = SetKind | MapKind | ListKind | TupleKind
+  pure val collectionKinds = Set(SetKind, MapKind, ListKind, TupleKind)
+
+  // The alternate encoding pads a decimal and reorders nested set elements and map entries.
+  pure def nestedNodes(alternate: bool): List[ValueNode] = List(
+    IntegerNode({ negative: false, digits: if (alternate) List(0, 7) else List(7) }),
+    BooleanNode(true),
+    TextNode("field"),
+    SetNode(if (alternate) List(1, 0) else List(0, 1)),
+    TupleNode(List(3, 2)),
+    RecordNode(Map("tuple" -> 4, "number" -> 0)),
+    ListNode(List(4, 3)),
+    MapNode(if (alternate) List((3, 2), (4, 5)) else List((4, 5), (3, 2))),
+  )
+
+  pure def nestedCollection(kind: CollectionKind, order: List[int], alternate: bool): ItfValue = {
+    val nodes = nestedNodes(alternate)
+    val elements = order.foldl(List(), (ids, index) => ids.append(3 + index))
+    val bindings = List((3, 6), (4, 7), (5, 4))
+    val rootNode = match kind {
+      | SetKind => SetNode(elements)
+      | MapKind => MapNode(order.foldl(List(), (entries, index) => entries.append(bindings.nth(index))))
+      | ListKind => ListNode(elements)
+      | TupleKind => TupleNode(elements)
+    }
+    { nodes: nodes.append(rootNode), root: nodes.length() }
+  }
+
+  run nestedCollectionPermutationTest = {
+    val permutationCounts = List(1, 1, 2, 6)
+    all {
+      permutationCounts.indices().forall(arity => {
+        val orders = permutations(arity)
+        orders.size() == permutationCounts.nth(arity) and
+          orders.forall(order =>
+            order.length() == arity and
+              order.foldl(Set(), (seen, index) => seen.union(Set(index))) == order.indices())
+      }),
+      permutationCounts.indices().forall(arity => {
+        val orders = permutations(arity)
+        collectionKinds.forall(kind => orders.forall(leftOrder => orders.forall(rightOrder => {
+          val left = nestedCollection(kind, leftOrder, false)
+          val right = nestedCollection(kind, rightOrder, true)
+          val unordered = kind == SetKind or kind == MapKind
+          all {
+            isUsable(left),
+            isUsable(right),
+            equalValues(left, right) == (unordered or leftOrder == rightOrder),
+          }
+        })))
+      }),
+    }
+  }
+
+  run compoundEqualityLawsTest = {
+    val ordinaryOrder = List(0, 1, 2)
+    val orders = permutations(ordinaryOrder.length())
+    val records = Set(false, true).map(alternate => { nodes: nestedNodes(alternate), root: 5 })
+    val values = collectionKinds.fold(records, (allValues, kind) =>
+      allValues.union(orders.map(order => nestedCollection(kind, order, false)))
+        .union(Set(nestedCollection(kind, ordinaryOrder, true))))
+    val equalTo = values.mapBy(left => values.filter(right => equalValues(left, right)))
+    val mapExample = nestedCollection(MapKind, ordinaryOrder, false)
+    all {
+      values.size() == 30,
+      values.forall(isUsable),
+      // Seven different representations of the same map give nontrivial transitive chains.
+      equalTo.get(mapExample).size() == 7,
+      values.forall(left => equalTo.get(left).contains(left)),
+      values.forall(left => values.forall(right =>
+        equalTo.get(left).contains(right) == equalTo.get(right).contains(left))),
+      values.forall(left => equalTo.get(left).forall(middle =>
+        equalTo.get(middle).subseteq(equalTo.get(left)))),
+    }
+  }
 }
