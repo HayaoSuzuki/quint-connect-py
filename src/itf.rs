@@ -244,6 +244,12 @@ fn decode_value(doc: &Document, id: NodeId) -> Option<Value> {
 }
 
 #[cfg(test)]
+pub(crate) fn fixture_value(text: &str) -> Option<Value> {
+    let doc = Document::parse(text).ok()?;
+    decode_value(&doc, doc.root)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
