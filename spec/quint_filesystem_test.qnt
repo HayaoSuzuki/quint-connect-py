@@ -183,4 +183,82 @@ module quint_filesystem_test {
         readFileBytes(filesystem, firstAlias) == FileBytes(bytesOfSecondCall) and
         readFileBytes(filesystem, secondAlias) == FileUnavailable(MissingFile) and
         readFileBytes(filesystem, callerFile) == FileBytes(List(255, 0)) and safety)
+
+  run artifactReservationIsExclusiveUntilAbandonedTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserveAndGenerate(2, bytesOfSecondCall))
+      .expect(not(canStageReservedEvidence(filesystem, 1, trace)))
+      .then(reserveArtifact(1, 9))
+      .expect(not(canReserveArtifactDirectory(filesystem, 2, 9)) and
+        not(canReserveArtifactDirectory(filesystem, 1, 10)) and
+        not(canStageReservedEvidence(filesystem, 2, 2)) and
+        reserveArtifactDirectory(filesystem, 2, 9) == filesystem and safety)
+      .then(stageReserved(1, trace))
+      .then(writeCopy(1, 2))
+      .expect(not(canReserveArtifactDirectory(filesystem, 2, 9)) and
+        readFileBytes(filesystem, evidencePath(root, 9, trace)) == FileUnavailable(MissingFile) and safety)
+      .then(abandon(1))
+      .then(reserveArtifact(2, 9))
+      .then(stageReserved(2, trace))
+      .then(writeCopy(2, bytesOfSecondCall.length()))
+      .then(publish(2))
+      .then(cleanup(2, RemoveComplete))
+      .expect(readFileBytes(filesystem, evidencePath(root, 9, trace)) == FileBytes(bytesOfSecondCall) and
+        readFileBytes(filesystem, secondArtifact) == FileUnavailable(MissingFile) and safety)
+
+  run publishedArtifactDirectoryRejectsCollisionAfterCleanupTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserveArtifact(1, 9))
+      .then(stageReserved(1, trace))
+      .then(writeCopy(1, bytesOfFirstCall.length()))
+      .then(publish(1))
+      .then(cleanup(1, RemoveComplete))
+      .then(reserveAndGenerate(2, bytesOfSecondCall))
+      .expect(not(canReserveArtifactDirectory(filesystem, 2, 9)) and
+        reserveArtifactDirectory(filesystem, 2, 9) == filesystem and safety)
+      .then(cleanup(2, RemoveComplete))
+      .expect(filesystem.files == initialFiles.files.put(evidencePath(root, 9, trace), bytesOfFirstCall) and safety)
+
+  run artifactDirectoryCandidatesAreScopedByRootTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserve(2, 2, List("4", "2"), "/alternate"))
+      .then(generate(2, GeneratedFiles(Map(trace -> bytesOfSecondCall))))
+      .then(reserveArtifact(1, 9))
+      .then(reserveArtifact(2, 9))
+      .then(stageReserved(1, trace))
+      .then(stageReserved(2, trace))
+      .then(writeCopy(1, bytesOfFirstCall.length()))
+      .then(writeCopy(2, bytesOfSecondCall.length()))
+      .then(publish(1))
+      .then(publish(2))
+      .then(cleanup(1, RemoveComplete))
+      .then(cleanup(2, RemoveComplete))
+      .expect(filesystem.files == initialFiles.files
+        .put(evidencePath(root, 9, trace), bytesOfFirstCall)
+        .put(evidencePath("/alternate", 9, trace), bytesOfSecondCall) and safety)
+
+  run cleanupReleasesAnUnusedArtifactReservationTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserveArtifact(1, 9))
+      .then(cleanup(1, RemoveComplete))
+      .then(reserveAndGenerate(2, bytesOfSecondCall))
+      .then(reserveArtifact(2, 9))
+      .expect(filesystem.files == initialFiles.files
+        .put(secondTrace, bytesOfSecondCall)
+        .put(workingPath(2, 2), List(0, 255)) and safety)
+
+  run preexistingDirectoriesRejectReservationRegardlessOfContentsTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .expect(not(canReserveArtifactDirectory(filesystem, 1, occupiedDirectory)) and
+        not(canReserveArtifactDirectory(filesystem, 1, emptyOccupiedDirectory)) and
+        reserveArtifactDirectory(filesystem, 1, occupiedDirectory) == filesystem and
+        reserveArtifactDirectory(filesystem, 1, emptyOccupiedDirectory) == filesystem and safety)
+      .then(cleanup(1, RemoveComplete))
+      .expect(filesystem.files == initialFiles.files and
+        filesystem.artifactDirectories == initialFiles.artifactDirectories and safety)
 }

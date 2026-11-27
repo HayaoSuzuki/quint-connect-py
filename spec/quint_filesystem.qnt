@@ -1,10 +1,14 @@
 // Logical filesystem effects of generation, evidence retention, and cleanup.
 // Roots and path spellings are opaque labels. File entries hold opaque ITF
-// bytes or an alias to another path. Caller entries are fixed, and a call owns
-// the entries inside its fresh workspace.
+// bytes or an alias to another path. Caller entries are fixed. A call owns
+// its fresh workspace and may exclusively reserve a directory under its artifact root.
 module quint_filesystem {
   type Bytes = List[int]
   type TraceFiles = int -> Bytes
+
+  type ArtifactDirectory = { root: str, directory: int }
+  type ArtifactDirectoryOwner = ExistingArtifactDirectory | OwnedArtifactDirectory(int)
+  type ArtifactDirectoryReservation = NoArtifactDirectory | ArtifactDirectoryReserved(int)
 
   type FilePath =
     | SavedFile(str)
@@ -34,6 +38,7 @@ module quint_filesystem {
     // Keep the generation manifest for comparison even after work files are gone.
     output: GenerationFiles,
     evidence: Evidence,
+    artifactDirectory: ArtifactDirectoryReservation,
     status: WorkspaceStatus,
   }
 
@@ -41,15 +46,18 @@ module quint_filesystem {
     files: FilePath -> Bytes,
     aliases: FilePath -> FilePath,
     workspaces: int -> WorkspaceFiles,
+    artifactDirectories: ArtifactDirectory -> ArtifactDirectoryOwner,
   }
 
-  pure val emptyFileSystem: FileSystem = { files: Map(), aliases: Map(), workspaces: Map() }
+  pure val emptyFileSystem: FileSystem = {
+    files: Map(), aliases: Map(), workspaces: Map(), artifactDirectories: Map(),
+  }
 
   pure def workingPath(workspace: int, trace: int): FilePath =
     WorkingFile({ workspace: workspace, trace: trace })
 
-  pure def evidencePath(root: str, workspace: int, trace: int): FilePath =
-    EvidenceFile({ root: root, directory: workspace, trace: trace })
+  pure def evidencePath(root: str, directory: int, trace: int): FilePath =
+    EvidenceFile({ root: root, directory: directory, trace: trace })
 
   pure def resolveFilePath(fs: FileSystem, path: FilePath): FileResolution = {
     val aliasPaths = fs.aliases.keys()
@@ -118,7 +126,8 @@ module quint_filesystem {
   pure def reserveFiles(fs: FileSystem, workspace: int, owner: int, seed: List[str], root: str): FileSystem =
     { ...fs, workspaces: fs.workspaces.put(workspace, {
       owner: owner, seed: seed, root: root,
-      output: NoGeneratedFiles, evidence: NoEvidence, status: WorkspaceActive,
+      output: NoGeneratedFiles, evidence: NoEvidence, artifactDirectory: NoArtifactDirectory,
+      status: WorkspaceActive,
     }) }
 
   pure def writtenFiles(output: GenerationFiles): TraceFiles =
@@ -164,9 +173,60 @@ module quint_filesystem {
         }
     }
 
-  pure def canStageEvidence(fs: FileSystem, workspace: int, trace: int): bool =
+  pure def artifactDirectoryAvailable(fs: FileSystem, root: str, candidate: int): bool =
+    not(fs.artifactDirectories.keys().contains({ root: root, directory: candidate }))
+
+  pure def canReserveArtifactDirectory(fs: FileSystem, workspace: int, candidate: int): bool =
+    if (workspaceAvailable(fs, workspace)) false else {
+      val ws = fs.workspaces.get(workspace)
+      ws.status == WorkspaceActive and ws.evidence == NoEvidence and
+        ws.artifactDirectory == NoArtifactDirectory and artifactDirectoryAvailable(fs, ws.root, candidate)
+    }
+
+  pure def reserveArtifactDirectory(fs: FileSystem, workspace: int, candidate: int): FileSystem =
+    if (canReserveArtifactDirectory(fs, workspace, candidate)) {
+      val ws = fs.workspaces.get(workspace)
+      {
+        ...fs,
+        artifactDirectories: fs.artifactDirectories.put(
+          { root: ws.root, directory: candidate }, OwnedArtifactDirectory(workspace)
+        ),
+        workspaces: fs.workspaces.put(workspace, { ...ws, artifactDirectory: ArtifactDirectoryReserved(candidate) }),
+      }
+    } else fs
+
+  pure def ownsArtifactDirectory(fs: FileSystem, workspace: int): bool = {
+    val ws = fs.workspaces.get(workspace)
+    match ws.artifactDirectory {
+      | NoArtifactDirectory => false
+      | ArtifactDirectoryReserved(directory) => {
+        val key = { root: ws.root, directory: directory }
+        if (fs.artifactDirectories.keys().contains(key))
+          fs.artifactDirectories.get(key) == OwnedArtifactDirectory(workspace)
+        else false
+      }
+    }
+  }
+
+  pure def releaseArtifactDirectory(fs: FileSystem, workspace: int): FileSystem = {
+    val ws = fs.workspaces.get(workspace)
+    match ws.artifactDirectory {
+      | NoArtifactDirectory => fs
+      | ArtifactDirectoryReserved(directory) => {
+        val key = { root: ws.root, directory: directory }
+        {
+          ...fs,
+          artifactDirectories: fs.artifactDirectories.keys().exclude(Set(key))
+            .mapBy(remaining => fs.artifactDirectories.get(remaining)),
+          workspaces: fs.workspaces.put(workspace, { ...ws, artifactDirectory: NoArtifactDirectory }),
+        }
+      }
+    }
+  }
+
+  pure def canStageReservedEvidence(fs: FileSystem, workspace: int, trace: int): bool =
     if (canReadGeneratedFile(fs, workspace, trace))
-      fs.workspaces.get(workspace).evidence == NoEvidence
+      fs.workspaces.get(workspace).evidence == NoEvidence and ownsArtifactDirectory(fs, workspace)
     else false
 
   pure def withEvidence(fs: FileSystem, workspace: int, evidence: Evidence): FileSystem = {
@@ -175,75 +235,111 @@ module quint_filesystem {
   }
 
   // Staging has no publicly retained path. Publication exposes the entire copy at once.
+  pure def stageReservedEvidence(fs: FileSystem, workspace: int, trace: int): FileSystem =
+    if (canStageReservedEvidence(fs, workspace, trace))
+      withEvidence(fs, workspace, StagedEvidence({ trace: trace, bytes: List() }))
+    else fs
+
+  // The default candidate preserves the one-step staging helper.
+  pure def canStageEvidence(fs: FileSystem, workspace: int, trace: int): bool =
+    canReadGeneratedFile(fs, workspace, trace) and canReserveArtifactDirectory(fs, workspace, workspace)
+
   pure def stageEvidence(fs: FileSystem, workspace: int, trace: int): FileSystem =
-    withEvidence(fs, workspace, StagedEvidence({ trace: trace, bytes: List() }))
+    if (canStageEvidence(fs, workspace, trace))
+      stageReservedEvidence(reserveArtifactDirectory(fs, workspace, workspace), workspace, trace)
+    else fs
 
   pure def canWriteEvidence(fs: FileSystem, workspace: int, count: int): bool =
     if (workspaceAvailable(fs, workspace)) false else
       match fs.workspaces.get(workspace).evidence {
         | StagedEvidence(staged) =>
-          count >= staged.bytes.length() and count <= fs.files.get(workingPath(workspace, staged.trace)).length()
+          ownsArtifactDirectory(fs, workspace) and
+            count >= staged.bytes.length() and count <= fs.files.get(workingPath(workspace, staged.trace)).length()
         | _ => false
       }
 
   pure def writeEvidence(fs: FileSystem, workspace: int, count: int): FileSystem =
-    match fs.workspaces.get(workspace).evidence {
-      | StagedEvidence(staged) =>
-        withEvidence(fs, workspace, StagedEvidence({
-          trace: staged.trace, bytes: fs.files.get(workingPath(workspace, staged.trace)).slice(0, count),
-        }))
-      | _ => fs
-    }
+    if (canWriteEvidence(fs, workspace, count))
+      match fs.workspaces.get(workspace).evidence {
+        | StagedEvidence(staged) =>
+          withEvidence(fs, workspace, StagedEvidence({
+            trace: staged.trace, bytes: fs.files.get(workingPath(workspace, staged.trace)).slice(0, count),
+          }))
+        | _ => fs
+      }
+    else fs
 
   pure def canPublishEvidence(fs: FileSystem, workspace: int): bool =
     if (workspaceAvailable(fs, workspace)) false else
       match fs.workspaces.get(workspace).evidence {
-        | StagedEvidence(staged) => staged.bytes == fs.files.get(workingPath(workspace, staged.trace))
+        | StagedEvidence(staged) =>
+          ownsArtifactDirectory(fs, workspace) and staged.bytes == fs.files.get(workingPath(workspace, staged.trace))
         | _ => false
       }
 
-  pure def publishEvidence(fs: FileSystem, workspace: int): FileSystem = {
-    val ws = fs.workspaces.get(workspace)
-    match ws.evidence {
-      | StagedEvidence(staged) => {
-        val published = withEvidence(fs, workspace, PublishedEvidence(staged.trace))
-        { ...published, files: fs.files.put(evidencePath(ws.root, workspace, staged.trace), staged.bytes) }
+  pure def publishEvidence(fs: FileSystem, workspace: int): FileSystem =
+    if (canPublishEvidence(fs, workspace)) {
+      val ws = fs.workspaces.get(workspace)
+      match ws.evidence {
+        | StagedEvidence(staged) =>
+          match ws.artifactDirectory {
+            | ArtifactDirectoryReserved(directory) => {
+              val published = withEvidence(fs, workspace, PublishedEvidence(staged.trace))
+              { ...published, files: fs.files.put(evidencePath(ws.root, directory, staged.trace), staged.bytes) }
+            }
+            | NoArtifactDirectory => fs
+          }
+        | _ => fs
       }
-      | _ => fs
-    }
-  }
+    } else fs
 
   pure def canAbandonEvidence(fs: FileSystem, workspace: int): bool =
     if (workspaceAvailable(fs, workspace)) false else
       match fs.workspaces.get(workspace).evidence {
-        | StagedEvidence(_) => true
+        | StagedEvidence(_) => ownsArtifactDirectory(fs, workspace)
         | _ => false
       }
 
   pure def abandonEvidence(fs: FileSystem, workspace: int): FileSystem =
-    match fs.workspaces.get(workspace).evidence {
-      | StagedEvidence(staged) => withEvidence(fs, workspace, AbandonedEvidence(staged.trace))
-      | _ => fs
+    if (canAbandonEvidence(fs, workspace))
+      match fs.workspaces.get(workspace).evidence {
+        | StagedEvidence(staged) => releaseArtifactDirectory(
+          withEvidence(fs, workspace, AbandonedEvidence(staged.trace)), workspace
+        )
+        | _ => fs
+      }
+    else fs
+
+  pure def copyCountAllowed(fs: FileSystem, workspace: int, trace: int, copy: CopyOutcome): bool =
+    match copy {
+      | CopyComplete => true
+      | CopyInterrupted(count) => 0 <= count and count <= fs.files.get(workingPath(workspace, trace)).length()
     }
 
+  pure def canRetainReservedTraceFile(fs: FileSystem, workspace: int, trace: int, copy: CopyOutcome): bool =
+    if (canStageReservedEvidence(fs, workspace, trace)) copyCountAllowed(fs, workspace, trace, copy)
+    else false
+
   pure def canRetainTraceFile(fs: FileSystem, workspace: int, trace: int, copy: CopyOutcome): bool =
-    if (canStageEvidence(fs, workspace, trace))
-      match copy {
-        | CopyComplete => true
-        | CopyInterrupted(count) => 0 <= count and count <= fs.files.get(workingPath(workspace, trace)).length()
-      }
+    if (canStageEvidence(fs, workspace, trace)) copyCountAllowed(fs, workspace, trace, copy)
     else false
 
   // The caller-facing storage outcome composes the internal copy transitions.
-  pure def retainTraceFile(fs: FileSystem, workspace: int, trace: int, copy: CopyOutcome): FileSystem = {
-    val staged = stageEvidence(fs, workspace, trace)
-    match copy {
-      | CopyComplete => publishEvidence(
-        writeEvidence(staged, workspace, fs.files.get(workingPath(workspace, trace)).length()), workspace
-      )
-      | CopyInterrupted(count) => abandonEvidence(writeEvidence(staged, workspace, count), workspace)
-    }
-  }
+  pure def retainReservedTraceFile(fs: FileSystem, workspace: int, trace: int, copy: CopyOutcome): FileSystem =
+    if (canRetainReservedTraceFile(fs, workspace, trace, copy)) {
+      val staged = stageReservedEvidence(fs, workspace, trace)
+      match copy {
+        | CopyComplete => publishEvidence(
+          writeEvidence(staged, workspace, fs.files.get(workingPath(workspace, trace)).length()), workspace
+        )
+        | CopyInterrupted(count) => abandonEvidence(writeEvidence(staged, workspace, count), workspace)
+      }
+    } else fs
+
+  pure def retainTraceFile(fs: FileSystem, workspace: int, trace: int, copy: CopyOutcome): FileSystem =
+    if (canRetainTraceFile(fs, workspace, trace, copy))
+      retainReservedTraceFile(reserveArtifactDirectory(fs, workspace, workspace), workspace, trace, copy)
+    else fs
 
   pure def remainingAfterCleanup(outcome: CleanupOutcome): Set[int] =
     match outcome {
@@ -262,13 +358,17 @@ module quint_filesystem {
   // Cleanup unlinks workspace entries by their own paths. An I/O error can
   // leave any subset of those entries behind.
   pure def cleanupFiles(fs: FileSystem, workspace: int, outcome: CleanupOutcome): FileSystem = {
-    val ws = fs.workspaces.get(workspace)
+    val withoutEmptyReservation =
+      if (fs.workspaces.get(workspace).evidence == NoEvidence) releaseArtifactDirectory(fs, workspace)
+      else fs
+    val ws = withoutEmptyReservation.workspaces.get(workspace)
     val remove = workingEntries(fs, workspace).exclude(remainingAfterCleanup(outcome))
       .map(trace => workingPath(workspace, trace))
     {
+      ...withoutEmptyReservation,
       files: fs.files.keys().exclude(remove).mapBy(path => fs.files.get(path)),
       aliases: fs.aliases.keys().exclude(remove).mapBy(path => fs.aliases.get(path)),
-      workspaces: fs.workspaces.put(workspace, {
+      workspaces: withoutEmptyReservation.workspaces.put(workspace, {
         ...ws,
         status: if (outcome == RemoveComplete) WorkspaceRemoved else WorkspacePartiallyRemoved,
       }),
@@ -287,35 +387,65 @@ module quint_filesystem {
     }
   }
 
-  pure def evidenceMatchesOutput(fs: FileSystem, workspace: int): bool = {
-    val ws = fs.workspaces.get(workspace)
-    val fromWorkspace = fs.files.keys().filter(path =>
+  pure def artifactDirectoryFiles(fs: FileSystem, directory: ArtifactDirectory): Set[FilePath] =
+    fs.files.keys().filter(path =>
       match path {
-        | EvidenceFile(saved) => saved.directory == workspace
+        | EvidenceFile(saved) => saved.root == directory.root and saved.directory == directory.directory
         | _ => false
       }
     )
-    match ws.evidence {
-      | NoEvidence => fromWorkspace.size() == 0
-      | StagedEvidence(staged) =>
-        fromWorkspace.size() == 0 and canReadGeneratedFile(fs, workspace, staged.trace) and
-          staged.bytes == fs.files.get(workingPath(workspace, staged.trace)).slice(0, staged.bytes.length())
-      | AbandonedEvidence(_) => fromWorkspace.size() == 0
-      | PublishedEvidence(trace) => {
-        val path = evidencePath(ws.root, workspace, trace)
-        match ws.output {
-          | GeneratedFiles(original) =>
-            fromWorkspace == Set(path) and fs.files.get(path) == original.get(trace)
+
+  pure def evidenceMatchesOutput(fs: FileSystem, workspace: int): bool = {
+    val ws = fs.workspaces.get(workspace)
+    match ws.artifactDirectory {
+      | NoArtifactDirectory =>
+        match ws.evidence {
+          | NoEvidence => true
+          | AbandonedEvidence(_) => true
           | _ => false
         }
+      | ArtifactDirectoryReserved(directory) => {
+        val entries = artifactDirectoryFiles(fs, { root: ws.root, directory: directory })
+        ownsArtifactDirectory(fs, workspace) and
+          match ws.evidence {
+            | NoEvidence => ws.status == WorkspaceActive and entries.size() == 0
+            | StagedEvidence(staged) =>
+              entries.size() == 0 and canReadGeneratedFile(fs, workspace, staged.trace) and
+                staged.bytes == fs.files.get(workingPath(workspace, staged.trace)).slice(0, staged.bytes.length())
+            | AbandonedEvidence(_) => false
+            | PublishedEvidence(trace) => {
+              val path = evidencePath(ws.root, directory, trace)
+              match ws.output {
+                | GeneratedFiles(original) =>
+                  entries == Set(path) and original.keys().contains(trace) and fs.files.get(path) == original.get(trace)
+                | _ => false
+              }
+            }
+          }
       }
     }
   }
 
-  pure def fileWorkspaceExists(fs: FileSystem, path: FilePath): bool =
+  pure def artifactDirectoryIsValid(fs: FileSystem, initial: FileSystem, directory: ArtifactDirectory): bool =
+    match fs.artifactDirectories.get(directory) {
+      | ExistingArtifactDirectory => {
+        val originalEntries = artifactDirectoryFiles(initial, directory)
+        initial.artifactDirectories.keys().contains(directory) and
+          initial.artifactDirectories.get(directory) == ExistingArtifactDirectory and
+          artifactDirectoryFiles(fs, directory) == originalEntries and
+          originalEntries.forall(path => fs.files.get(path) == initial.files.get(path))
+      }
+      | OwnedArtifactDirectory(workspace) =>
+        if (workspaceAvailable(fs, workspace)) false else {
+          val ws = fs.workspaces.get(workspace)
+          ws.root == directory.root and ws.artifactDirectory == ArtifactDirectoryReserved(directory.directory)
+        }
+    }
+
+  pure def fileDirectoryExists(fs: FileSystem, path: FilePath): bool =
     match path {
       | WorkingFile(work) => fs.workspaces.keys().contains(work.workspace)
-      | EvidenceFile(saved) => fs.workspaces.keys().contains(saved.directory)
+      | EvidenceFile(saved) => fs.artifactDirectories.keys().contains({ root: saved.root, directory: saved.directory })
       | SavedFile(_) => true
     }
 
@@ -334,7 +464,14 @@ module quint_filesystem {
       savedAliases(fs) == savedAliases(initial),
       fs.files.keys().intersect(fs.aliases.keys()).size() == 0,
       fs.aliases.keys().forall(path => aliasEntryIsValid(fs, path)),
-      fs.files.keys().forall(path => fileWorkspaceExists(fs, path)),
+      fs.files.keys().forall(path => fileDirectoryExists(fs, path)),
+      initial.artifactDirectories.keys().forall(directory =>
+        if (initial.artifactDirectories.get(directory) == ExistingArtifactDirectory)
+          not(artifactDirectoryAvailable(fs, directory.root, directory.directory)) and
+            fs.artifactDirectories.get(directory) == ExistingArtifactDirectory
+        else true
+      ),
+      fs.artifactDirectories.keys().forall(directory => artifactDirectoryIsValid(fs, initial, directory)),
       fs.workspaces.keys().forall(workspace =>
         workingFilesMatchOutput(fs, workspace) and evidenceMatchesOutput(fs, workspace)
       ),
@@ -350,11 +487,22 @@ module quint_filesystem_sample {
   import quint_filesystem.*
 
   pure val root: str = "/artifacts"
+  pure val alternateRoot: str = "/alternate"
+  pure val occupiedDirectory: int = 3
+  pure val emptyOccupiedDirectory: int = 4
   pure val trace: int = 1
   pure val bytesOfFirstCall: Bytes = List(123, 10, 125, 10)
   pure val bytesOfSecondCall: Bytes = List(123, 32, 125)
   pure val initialFiles: FileSystem = {
-    ...emptyFileSystem, files: Map(SavedFile("trace-1.itf.json") -> List(255, 0)),
+    ...emptyFileSystem,
+    files: Map(
+      SavedFile("trace-1.itf.json") -> List(255, 0),
+      evidencePath(root, occupiedDirectory, trace) -> List(8, 16),
+    ),
+    artifactDirectories: Map(
+      { root: root, directory: occupiedDirectory } -> ExistingArtifactDirectory,
+      { root: root, directory: emptyOccupiedDirectory } -> ExistingArtifactDirectory,
+    ),
   }
 
   var filesystem: FileSystem
@@ -374,6 +522,16 @@ module quint_filesystem_sample {
   action createWorkspaceAlias(workspace: int, owner: int, trace: int, target: FilePath): bool = all {
     canCreateWorkingAlias(filesystem, workspace, owner, trace),
     filesystem' = createWorkingAlias(filesystem, workspace, trace, target),
+  }
+
+  action reserveArtifact(workspace: int, candidate: int): bool = all {
+    canReserveArtifactDirectory(filesystem, workspace, candidate),
+    filesystem' = reserveArtifactDirectory(filesystem, workspace, candidate),
+  }
+
+  action stageReserved(workspace: int, trace: int): bool = all {
+    canStageReservedEvidence(filesystem, workspace, trace),
+    filesystem' = stageReservedEvidence(filesystem, workspace, trace),
   }
 
   action stage(workspace: int, trace: int): bool = all {
@@ -411,13 +569,17 @@ module quint_filesystem_sample {
   action step: bool = {
     nondet workspace = Set(1, 2).oneOf()
     nondet count = 0.to(4).oneOf()
+    nondet artifactRoot = Set(root, alternateRoot).oneOf()
+    nondet candidate = Set(1, 2, occupiedDirectory, emptyOccupiedDirectory).oneOf()
     val otherWorkspace = if (workspace == 1) 2 else 1
     val bytes = if (workspace == 1) bytesOfFirstCall else bytesOfSecondCall
     any {
-      reserve(workspace, workspace, List("4", "2"), root),
+      reserve(workspace, workspace, List("4", "2"), artifactRoot),
       generate(workspace, GeneratedFiles(Map(trace -> bytes, 2 -> List(0, 255)))),
       generate(workspace, AbortedFiles(Map(trace -> bytes.slice(0, 1)))),
       createWorkspaceAlias(workspace, workspace, 3, evidencePath(root, otherWorkspace, trace)),
+      reserveArtifact(workspace, candidate),
+      stageReserved(workspace, trace),
       stage(workspace, trace),
       writeCopy(workspace, count),
       publish(workspace),
