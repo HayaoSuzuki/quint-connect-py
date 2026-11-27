@@ -32,7 +32,9 @@ jobs:
           version: '0.13.10'
           enable-cache: false
       - name: Check workflow syntax and shell scripts
-        run: uvx --python 3.14 --from actionlint-py==1.7.12.25 --with shellcheck-py==0.11.0.1 actionlint
+        run: |
+          uvx --python 3.14 --from actionlint-py==1.7.12.25 --with shellcheck-py==0.11.0.1 actionlint
+          uvx --python 3.14 --from shellcheck-py==0.11.0.1 shellcheck .github/scripts/install-quint.sh
       - name: Audit workflows
         run: uvx --python 3.14 --from zizmor==1.32.0 zizmor --offline --persona auditor .github/workflows
 
@@ -83,10 +85,8 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
-      - name: Install Quint
-        run: |
-          npm ci --prefix spec --ignore-scripts --no-audit --no-fund
-          echo "$GITHUB_WORKSPACE/spec/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Install Quint and its Rust evaluator
+        run: bash .github/scripts/install-quint.sh
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - run: cargo test --locked --no-default-features
@@ -132,10 +132,8 @@ jobs:
         with:
           node-version: '22'
           package-manager-cache: false
-      - name: Install Quint
-        run: |
-          npm ci --prefix spec --ignore-scripts --no-audit --no-fund
-          echo "$GITHUB_WORKSPACE/spec/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Install Quint and its Rust evaluator
+        run: bash .github/scripts/install-quint.sh
       - name: Install Rust toolchain
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
       - name: Build the extension and install test dependencies
