@@ -1,3 +1,3 @@
-# 利用者向けドキュメント
+# User documentation
 
-- [Quint トレースの生成と再生](guides/usage.md) — ドライバーの書き方、保存済み ITF、pytest の並列実行。
+- [Generate and replay Quint traces](guides/usage.md) covers writing a driver, replaying saved ITF traces, and running tests in parallel with pytest.

@@ -1,15 +1,17 @@
-#!/usr/bin/env python3
 """Export deterministic runner fixtures from Quint or check an adapter against them."""
 
 import argparse
 import difflib
 import json
-from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
+from typing import Any
 
+# Quint's exported JSON includes heterogeneous model values.
+Json = Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "spec" / "quint_conformance.qnt"
@@ -38,21 +40,26 @@ EVENTS = {
 }
 
 
-def canonical_json(value):
+def canonical_json(value: object) -> str:
+    """Serialize a JSON value for comparison or ordering."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def render_json(value):
+def render_json(value: object) -> str:
+    """Serialize a fixture with compact byte arrays."""
     text = json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2)
     # Keep numeric arrays (file contents and process output) on one line.
-    return re.sub(
-        r"\[\n(?: +[0-9]{1,3},?\n)+ +\]",
-        lambda match: json.dumps(json.loads(match.group())),
-        text,
-    ) + "\n"
+    return (
+        re.sub(
+            r"\[\n(?: +[0-9]{1,3},?\n)+ +\]",
+            lambda match: json.dumps(json.loads(match.group())),
+            text,
+        )
+        + "\n"
+    )
 
 
-def normalize_itf(value, *, unpack_integers=False):
+def normalize_itf(value: Json, *, unpack_integers: bool = False) -> Json:
     """Order ITF sets and maps while preserving the order of plain arrays."""
     if isinstance(value, list):
         return [normalize_itf(item, unpack_integers=unpack_integers) for item in value]
@@ -62,26 +69,29 @@ def normalize_itf(value, *, unpack_integers=False):
         return int(value["#bigint"])
 
     normalized = {
-        key: normalize_itf(item, unpack_integers=unpack_integers) for key, item in value.items()
+        key: normalize_itf(item, unpack_integers=unpack_integers)
+        for key, item in value.items()
     }
     if normalized.keys() == {"#set"} or normalized.keys() == {"#map"}:
-        (tag, contents), = normalized.items()
+        ((tag, contents),) = normalized.items()
         if isinstance(contents, list):
             normalized[tag] = sorted(contents, key=canonical_json)
     return normalized
 
 
-def from_code_points(points):
+def from_code_points(points: list[int]) -> str:
+    """Convert Quint's Unicode scalar sequence to text."""
     return "".join(chr(point) for point in points)
 
 
-def itf_value(graph):
+def itf_value(graph: dict[str, Json]) -> Json:  # noqa: C901 - A branch per value tag.
     """Render the reachable portion of a Quint Value graph as one ITF value."""
     nodes = graph["nodes"]
 
-    def read(index):
+    def read(index: int) -> Json:  # noqa: PLR0911 - One result per value tag.
         if index < 0 or index >= len(nodes):
-            raise ValueError(f"Invalid value reference {index}")
+            msg = f"Invalid value reference {index}"
+            raise ValueError(msg)
         node = nodes[index]
         value = node["value"]
         match node["tag"]:
@@ -97,19 +107,24 @@ def itf_value(graph):
             case "TupleNode":
                 return {"#tup": [read(child) for child in value]}
             case "RecordNode":
-                return {from_code_points(key): read(child) for key, child in value["#map"]}
+                return {
+                    from_code_points(key): read(child) for key, child in value["#map"]
+                }
             case "SetNode":
-                return {"#set": sorted((read(child) for child in value), key=canonical_json)}
+                return {
+                    "#set": sorted((read(child) for child in value), key=canonical_json)
+                }
             case "MapNode":
                 pairs = [[read(child) for child in pair["#tup"]] for pair in value]
                 return {"#map": sorted(pairs, key=canonical_json)}
             case _:
-                raise ValueError(f"Cannot export Quint value node {node['tag']}")
+                msg = f"Cannot export Quint value node {node['tag']}"
+                raise ValueError(msg)
 
     return read(graph["root"])
 
 
-def project(value):
+def project(value: Json) -> Json:  # noqa: C901, PLR0911, PLR0912 - Protocol projection.
     """Translate model records to the fixture schema without deriving any outcomes."""
     if isinstance(value, list):
         return [project(item) for item in value]
@@ -118,7 +133,10 @@ def project(value):
     if value.keys() == {"nodes", "root"}:
         return itf_value(value)
     if value.keys() == {"actionPath", "statePath"}:
-        return {key: [from_code_points(segment) for segment in path] for key, path in value.items()}
+        return {
+            key: [from_code_points(segment) for segment in path]
+            for key, path in value.items()
+        }
     if value.keys() == {"name", "trace", "bytes"}:
         return {**value, "name": "".join(value["name"])}
     if value.keys() == {"tag", "value"}:
@@ -130,11 +148,12 @@ def project(value):
         else:
             payload = project(payload)
         return {"tag": tag, "value": payload}
-    result = {}
+    result: dict[str, Json] = {}
     for key, item in value.items():
         if key == "arguments":
             result[key] = {
-                from_code_points(name): itf_value(argument) for name, argument in item["#map"]
+                from_code_points(name): itf_value(argument)
+                for name, argument in item["#map"]
             }
         elif key == "name" and "arguments" in value:
             result[key] = from_code_points(item)
@@ -144,21 +163,26 @@ def project(value):
         result["basename"] = "".join(result["basename"])
     if "basenames" in result:
         result["basenames"] = {
-            "#map": [[trace, "".join(name)] for trace, name in result["basenames"]["#map"]]
+            "#map": [
+                [trace, "".join(name)] for trace, name in result["basenames"]["#map"]
+            ]
         }
     return result
 
 
-def state_variable(state, name):
+def state_variable(state: dict[str, Json], name: str) -> Json:
+    """Read a state field by its unqualified Quint name."""
     (value,) = [value for key, value in state.items() if key.split("::")[-1] == name]
     return normalize_itf(value, unpack_integers=True)
 
 
-def project_file(path, contents):
+def project_file(path: Json, contents: list[int]) -> dict[str, Json]:
+    """Project a modeled path and its bytes."""
     return {"path": project(path), "bytes": contents}
 
 
-def fixture_case(trace_file):
+def fixture_case(trace_file: Path) -> dict[str, Json]:
+    """Read one exported scenario and its expected result."""
     trace = json.loads(trace_file.read_text(encoding="utf-8"))
     initial, terminal = trace["states"][0], trace["states"][-1]
     schedule = [
@@ -175,12 +199,19 @@ def fixture_case(trace_file):
     for call_id in sorted(requests):
         call = call_states[call_id]
         if call["phase"]["tag"] != "Finished":
-            raise ValueError(f"Call {call_id} did not finish: {trace_file.name}")
-        calls.append({
-            "call_id": call_id,
-            "events": [project(event) for event in call["history"] if event["tag"] in EVENTS],
-            "outcome": project(call["phase"]["value"]),
-        })
+            msg = f"Call {call_id} did not finish: {trace_file.name}"
+            raise ValueError(msg)
+        calls.append(
+            {
+                "call_id": call_id,
+                "events": [
+                    project(event)
+                    for event in call["history"]
+                    if event["tag"] in EVENTS
+                ],
+                "outcome": project(call["phase"]["value"]),
+            }
+        )
     paths = {
         path
         for request in requests.values()
@@ -213,61 +244,106 @@ def fixture_case(trace_file):
     }
 
 
-def export(backend):
+def export(backend: str) -> dict[str, Json]:
+    """Generate fixture data with one Quint evaluator."""
     with tempfile.TemporaryDirectory(prefix=f"quint-fixtures-{backend}-") as scratch:
         result = subprocess.run(
             [
-                "quint", "test", str(SPEC), "--backend", backend, "--seed", "1",
-                "--max-samples", "1", "--out-itf", str(Path(scratch) / "case-{test}.itf.json"),
+                "quint",
+                "test",
+                str(SPEC),
+                "--backend",
+                backend,
+                "--seed",
+                "1",
+                "--max-samples",
+                "1",
+                "--out-itf",
+                str(Path(scratch) / "case-{test}.itf.json"),
             ],
             cwd=ROOT,
+            check=False,
             capture_output=True,
             text=True,
         )
         if result.returncode:
-            raise ValueError(f"Quint {backend} scenarios failed\n{result.stdout}{result.stderr}")
+            msg = f"Quint {backend} scenarios failed\n{result.stdout}{result.stderr}"
+            raise ValueError(msg)
         traces = sorted(Path(scratch).glob("case-*Test.itf.json"))
         if not traces:
-            raise ValueError(f"Quint {backend} emitted no conformance traces")
-        return {"schema_version": SCHEMA_VERSION, "cases": [fixture_case(path) for path in traces]}
+            msg = f"Quint {backend} emitted no conformance traces"
+            raise ValueError(msg)
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "cases": [fixture_case(path) for path in traces],
+        }
 
 
-def require_equal(expected, actual, expected_label, actual_label):
+def require_equal(
+    expected: str, actual: str, expected_label: str, actual_label: str
+) -> None:
+    """Report any output difference as a unified diff."""
     if expected != actual:
         diff = difflib.unified_diff(
-            expected.splitlines(keepends=True), actual.splitlines(keepends=True),
-            fromfile=expected_label, tofile=actual_label,
+            expected.splitlines(keepends=True),
+            actual.splitlines(keepends=True),
+            fromfile=expected_label,
+            tofile=actual_label,
         )
         raise ValueError("".join(diff).rstrip())
 
 
-def check_adapter(command):
+def check_adapter(command: list[str]) -> None:
+    """Drive an adapter with inputs and compare its output with the model."""
     fixture = json.loads(FIXTURES.read_text(encoding="utf-8"))
     if fixture["schema_version"] != SCHEMA_VERSION:
-        raise ValueError(f"Unsupported fixture schema version {fixture['schema_version']}")
+        msg = f"Unsupported fixture schema version {fixture['schema_version']}"
+        raise ValueError(msg)
     for case in fixture["cases"]:
         inputs = {key: value for key, value in case.items() if key != "expected"}
         inputs["schema_version"] = SCHEMA_VERSION
         result = subprocess.run(
-            command, input=canonical_json(inputs) + "\n", capture_output=True, text=True, encoding="utf-8",
+            command,
+            input=canonical_json(inputs) + "\n",
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
         )
         if result.returncode:
-            raise ValueError(f"Adapter failed for {case['name']} (exit {result.returncode})\n{result.stderr}")
+            msg = (
+                f"Adapter failed for {case['name']} (exit {result.returncode})\n"
+                f"{result.stderr}"
+            )
+            raise ValueError(msg)
         try:
             actual = normalize_itf(json.loads(result.stdout))
         except ValueError as error:
-            raise ValueError(f"Adapter output for {case['name']} is invalid JSON: {error}") from error
-        require_equal(render_json(case["expected"]), render_json(actual), case["name"], "adapter output")
+            msg = f"Adapter output for {case['name']} is invalid JSON: {error}"
+            raise ValueError(msg) from error
+        require_equal(
+            render_json(case["expected"]),
+            render_json(actual),
+            case["name"],
+            "adapter output",
+        )
     print(f"Adapter matched all {len(fixture['cases'])} conformance cases.")
 
 
-def main():
+def main() -> int:
+    """Export fixtures, verify fixture freshness, or check an adapter."""
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--check", action="store_true", help="compare both Quint backends with the checked-in JSON")
     mode.add_argument(
-        "--adapter", nargs=argparse.REMAINDER, metavar="COMMAND",
-        help="run a command once per fixture with the case inputs on stdin and the expected object on stdout",
+        "--check",
+        action="store_true",
+        help="compare both Quint backends with the checked-in JSON",
+    )
+    mode.add_argument(
+        "--adapter",
+        nargs=argparse.REMAINDER,
+        metavar="COMMAND",
+        help="run a command per fixture with inputs on stdin and results on stdout",
     )
     args = parser.parse_args()
     if args.adapter == []:
@@ -280,13 +356,23 @@ def main():
 
         typescript = export(BACKENDS[0])
         expected = render_json(typescript)
-        require_equal(expected, render_json(export(BACKENDS[1])), BACKENDS[0], BACKENDS[1])
+        require_equal(
+            expected, render_json(export(BACKENDS[1])), BACKENDS[0], BACKENDS[1]
+        )
         if args.check:
-            require_equal(FIXTURES.read_text(encoding="utf-8"), expected, str(FIXTURES), "Quint export")
+            require_equal(
+                FIXTURES.read_text(encoding="utf-8"),
+                expected,
+                str(FIXTURES),
+                "Quint export",
+            )
         else:
             FIXTURES.parent.mkdir(parents=True, exist_ok=True)
             FIXTURES.write_text(expected, encoding="utf-8")
-        print(f"Both Quint backends agree on {len(typescript['cases'])} cases in {FIXTURES.relative_to(ROOT)}.")
+        print(
+            f"Both Quint backends agree on {len(typescript['cases'])} cases in "
+            f"{FIXTURES.relative_to(ROOT)}."
+        )
     except (OSError, ValueError) as error:
         print(error, file=sys.stderr)
         return 1

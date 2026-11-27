@@ -3,3 +3,12 @@
 /.idea/modules.xml
 /.idea/quint-connect-py.iml
 /.idea/vcs.xml
+/target/
+/dist/
+/.venv/
+*.so
+*.pyd
+__pycache__/
+.pytest_cache/
+.hypothesis/
+/spec/node_modules/

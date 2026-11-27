@@ -1,4 +1,10 @@
 # quint-connect-py
-quint-connect for Python
 
-[利用者向けドキュメント](docs/user/index.md) · [開発者向けドキュメント](docs/development/index.md)
+Run Quint model traces against Python code.
+
+- [User documentation](docs/user/index.md)
+- [Developer documentation](docs/development/index.md)
+
+## License
+
+[Apache License 2.0](LICENSE)

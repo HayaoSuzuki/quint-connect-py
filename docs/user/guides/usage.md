@@ -1,12 +1,18 @@
-# Quint トレースの生成と再生
+# Generate and replay Quint traces
 
-このページの例は初版の設計に基づく。対応する Python は 3.14 と 3.15 で、パッケージの import 名は `quint_connect` となる。
+Import `quint_connect` on Python 3.14 or 3.15.
 
-## ドライバー
+## Write a driver
 
-テスト対象の公開 API で操作を実行する `step(action)` と、比較対象の状態を返す `observe()` を用意する。`action.name` が操作名、`action.arguments` が名前付き引数を表す。初期化もステップ 0 の操作名に従って処理する。Quint が匿名操作として記録した `action.name` は空文字列になる。ファクトリーは呼び出されるたびに新しいドライバーを返す。
+Implement `step(action)` to apply an operation through the public API of the code
+under test. Implement `observe()` to return the state you want to compare with
+the model. Read the operation name from `action.name` and its named arguments
+from `action.arguments`. Handle initialization through the operation recorded
+at step 0. Quint records an empty name for anonymous operations.
 
-## 保存済み ITF
+Provide a factory that returns a fresh driver each time Quint Connect calls it.
+
+## Replay a saved ITF trace
 
 ```python
 from quint_connect import replay
@@ -14,9 +20,12 @@ from quint_connect import replay
 replay("counter.itf.json", CounterDriver, state_path=("count",))
 ```
 
-この例では、トレースの各状態から `count` を取り出して `observe()` の戻り値と比較する。`CounterDriver` はテスト対象に合わせて用意する。保存済み ITF は、対応する wheel をインストールした Python 環境でオフライン再生できる。
+With this selection, `replay()` compares `count` in each trace state with the
+value returned by `observe()`. Implement `CounterDriver` for the code under
+test. After installing a compatible wheel, you can replay saved ITF traces
+offline.
 
-## Quint で生成
+## Generate traces with Quint
 
 ```python
 from quint_connect import Simulation, run
@@ -30,10 +39,36 @@ run(
 )
 ```
 
-初版では Quint 0.34.0 の Rust と TypeScript のバックエンドを検証対象とする。名前付きテストを使う場合は、たとえば `NamedTest("counter.qnt", test="roundTripTest")` を渡し、モデルが記録した操作の位置を `action_path` に指定する。状態不一致の例外から seed と失敗 ITF の保存先を確認し、その ITF を `replay()` に渡せる。
+The first release targets the Rust and TypeScript backends of Quint 0.34.0.
+To generate traces from a named test, pass
+`NamedTest("counter.qnt", test="roundTripTest")` and set `action_path` to the
+field path where the model records the operation. If a generated trace reveals
+a state mismatch, use the exception's `seed` and `artifact_path` to identify
+the run and pass the saved trace to `replay()`.
 
-## pytest から呼ぶ
+## Run from pytest
 
-テスト関数の中から `run()` と `replay()` を呼ぶ。`pytest -n 2` を使う場合も呼び出し方は同じである。`run()` の生成先は呼び出しごとに確保され、保存済み ITF は複数のワーカーで読み取れる。ドライバーが書き込む DB やファイルも、必要に応じてテスト側のファクトリーで分ける。
+Call `run()` or `replay()` inside a test function. The calls work with
+`pytest -n 2`. Each call to `run()` generates traces in its own working
+directory, and several workers can read the same saved trace. If drivers write
+to a database or files, have the factory allocate separate resources as needed.
 
-Hypothesis を使う場合は、`@given` で選んだ 0 以上 `2**64 - 1` 以下の整数を `run()` の `seed` に渡す。Hypothesis が縮小する入力は seed である。
+With Hypothesis, use `@given` to pick an integer between 0 and `2**64 - 1`,
+inclusive, and pass it to `run()` as the `seed`. Hypothesis shrinks the seed.
+
+```python
+from hypothesis import given, strategies as st
+from quint_connect import Simulation, run
+
+
+@given(seed=st.integers(min_value=0, max_value=2**64 - 1))
+def test_counter_follows_model(seed: int) -> None:
+    run(
+        Simulation("examples/counter.qnt", max_steps=2),
+        CounterDriver,
+        quint="quint",
+        seed=seed,
+        action_path=("op",),
+        state_path=("count",),
+    )
+```
