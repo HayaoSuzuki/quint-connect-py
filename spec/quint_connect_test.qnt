@@ -159,7 +159,7 @@ module quint_connect_test {
       .expect(finishedAs(1, Failed({
         error: StatesDiffer({
           detail: typedMismatch,
-          artifacts: FromGeneration({ seed: sampleSeed, save: ArtifactSaved({ directory: FailureDirectory(1), trace: 7, root: defaultArtifactRoot }) }),
+          artifacts: FromGeneration({ seed: sampleSeed, save: ArtifactSaved(fs::evidencePath(defaultArtifactRoot, 1, 7)) }),
         }),
         cleanup: CleanupAlsoFailed("cleanup failed"),
       })) and finishedAs(2, failed(StatesDiffer({
@@ -188,10 +188,10 @@ module quint_connect_test {
       .then(cleanWorkspace(2, StorageSucceeded))
       .expect(finishedAs(1, failed(StatesDiffer({
         detail: firstMismatch,
-        artifacts: FromGeneration({ seed: sampleSeed, save: ArtifactSaved({ directory: FailureDirectory(1), trace: 7, root: defaultArtifactRoot }) }),
+        artifacts: FromGeneration({ seed: sampleSeed, save: ArtifactSaved(fs::evidencePath(defaultArtifactRoot, 1, 7)) }),
       }))) and finishedAs(2, failed(StatesDiffer({
         detail: firstMismatch,
-        artifacts: FromGeneration({ seed: sampleSeed, save: ArtifactSaved({ directory: FailureDirectory(2), trace: 7, root: defaultArtifactRoot }) }),
+        artifacts: FromGeneration({ seed: sampleSeed, save: ArtifactSaved(fs::evidencePath(defaultArtifactRoot, 2, 7)) }),
       }))) and safety)
       .then(step.fail())
 
@@ -298,7 +298,9 @@ module quint_connect_test {
       .then(observeState(1, Observed(reversedItems)))
       .expect(finishedAs(1, Passed) and safety)
 
-  run sortedGenerationAndSavedBytesReproduceMismatchTest =
+  run sortedGenerationAndSavedBytesReproduceMismatchTest = {
+    val saved = fs::evidencePath("evidence", 1, 2)
+    val savedMismatch = { ...compoundMismatch, position: { trace: { trace: 0, traceIndex: 0 }, stepIndex: 0 } }
     init
       .then(startRequestedRun(1, sampleRequest, sampleSeed, "evidence", itemsSelection))
       .then(completeProcessSuccess(1, reverseDirectoryListing))
@@ -310,16 +312,17 @@ module quint_connect_test {
       .then(cleanWorkspaceWithRemoval(1, StorageSucceeded, fs::RemoveComplete))
       .expect(finishedAs(1, failed(StatesDiffer({
         detail: compoundMismatch,
-        artifacts: FromGeneration({ seed: cli::maxSeed, save: ArtifactSaved({ directory: FailureDirectory(1), trace: 2, root: "evidence" }) }),
+        artifacts: FromGeneration({ seed: cli::maxSeed, save: ArtifactSaved(saved) }),
       }))) and safety)
-      .expect(filesystem.files.keys() == Set(fs::evidencePath("evidence", 1, 2)))
-      .expect(filesystem.files.get(fs::evidencePath("evidence", 1, 2)) == originalBytes)
-      .then(replayEvidence(2, "evidence", 1, 2, itemsSelection))
-      .then(validateEvidenceDocument(2, originalBytes))
+      .expect(filesystem.files.keys() == Set(saved))
+      .expect(filesystem.files.get(saved) == originalBytes)
+      .then(startReplayPaths(2, List(saved), itemsSelection))
+      .then(readSavedPath(2, SavedReadSucceeded))
       .then(createDriver(2, FactorySucceeded(2)))
       .then(applyOperation(2, OperationApplied))
       .then(observeState(2, Observed(missingBoolean)))
-      .expect(finishedAs(2, failed(StatesDiffer({ detail: compoundMismatch, artifacts: FromSavedTrace }))) and safety)
+      .expect(finishedAs(2, failed(StatesDiffer({ detail: savedMismatch, artifacts: FromSavedFile(saved) }))) and safety)
+  }
 
   run wrongGeneratedBytesCannotBePassedToDecoderTest =
     init

@@ -49,8 +49,7 @@ module quint_connect {
 
   type Source =
     | SavedItf
-    | SavedPaths(List[str])
-    | SavedEvidence({ root: str, workspace: WorkspaceId })
+    | SavedPaths(List[fs::FilePath])
     | GeneratedItf(Generation)
 
   type TracePosition = {
@@ -83,13 +82,13 @@ module quint_connect {
   // Internal generation result, with filenames ordered by completeProcessSuccess.
   type GenerationResult = ProcessFailed(str) | ProcessSucceeded(List[TraceId])
 
-  type SavedTracePosition = { path: str, position: TracePosition }
+  type SavedTracePosition = { path: fs::FilePath, position: TracePosition }
 
   type Location =
     | AtTrace(TracePosition)
     | AtStep(StepPosition)
     | AtSavedTrace(SavedTracePosition)
-    | AtSavedStep({ path: str, position: StepPosition })
+    | AtSavedStep({ path: fs::FilePath, position: StepPosition })
 
   type SavedReadResult = SavedReadSucceeded | SavedReadFailed(str)
 
@@ -155,20 +154,11 @@ module quint_connect {
     actual: Value,
   }
 
-  // Retained evidence uses a distinct namespace and survives workspace cleanup.
-  type ArtifactDirectory = FailureDirectory(WorkspaceId)
-
-  type Artifact = {
-    directory: ArtifactDirectory,
-    trace: TraceId,
-    root: str,
-  }
-
-  type SaveResult = ArtifactSaved(Artifact) | ArtifactSaveFailed(str)
+  type SaveResult = ArtifactSaved(fs::FilePath) | ArtifactSaveFailed(str)
 
   type Artifacts =
     | FromSavedTrace
-    | FromSavedFile(str)
+    | FromSavedFile(fs::FilePath)
     | FromGeneration({ seed: Seed, save: SaveResult })
 
   type EmptyInput = NoInputPaths | NoGeneratedItf | NoTraceStates(TracePosition) | NoSavedTraceStates(SavedTracePosition)
@@ -210,7 +200,7 @@ module quint_connect {
   // The history records observable calls in order, including calls that fail.
   type Event =
     | ReplayRequested(List[TraceId])
-    | ReplayFilesRequested(List[str])
+    | ReplayFilesRequested(List[fs::FilePath])
     | SavedReadAttempted(SavedTracePosition)
     | CommandPrepared({ request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand })
     | WorkspaceReserved(Generation)
@@ -274,7 +264,6 @@ module quint_connect {
     match source {
       | SavedItf => returned(s, result)
       | SavedPaths(_) => returned(s, result)
-      | SavedEvidence(_) => returned(s, result)
       | GeneratedItf(generation) =>
         { ...s, phase: AwaitingCleanup({ generation: generation, result: result }) }
     }
@@ -421,7 +410,6 @@ module quint_connect {
       | SavedPaths(paths) => stop(recorded, source, StatesDiffer({
           detail: detail, artifacts: FromSavedFile(paths.nth(detail.position.trace.traceIndex)),
         }))
-      | SavedEvidence(_) => stop(recorded, source, StatesDiffer({ detail: detail, artifacts: FromSavedTrace }))
       | GeneratedItf(g) => { ...recorded, phase: AwaitingArtifact({ generation: g, detail: detail }) }
     }
   }
@@ -451,7 +439,7 @@ module quint_connect {
   pure def onArtifact(s: CallState, g: Generation, detail: Mismatch, result: StorageResult): CallState = {
     val recorded = recordEvent(s, s.phase, SaveAttempted({ position: detail.position.trace, result: result }))
     val save = match result {
-      | StorageSucceeded => ArtifactSaved({ directory: FailureDirectory(g.workspace), trace: detail.position.trace.trace, root: g.artifactRoot })
+      | StorageSucceeded => ArtifactSaved(fs::evidencePath(g.artifactRoot, g.workspace, detail.position.trace.trace))
       | StorageFailed(cause) => ArtifactSaveFailed(cause)
     }
     stop(recorded, GeneratedItf(g), StatesDiffer({
@@ -501,8 +489,15 @@ module quint_connect {
   action startReplay(id: CallId, traces: List[TraceId]): bool =
     startReplayWithSelection(id, traces, defaultSelection)
 
-  action startReplayPaths(id: CallId, paths: List[str], selection: itf::Selection): bool = all {
+  // Replay accepts caller files and published artifact paths, including paths that do not yet exist.
+  action startReplayPaths(id: CallId, paths: List[fs::FilePath], selection: itf::Selection): bool = all {
     calls.get(id).phase == Ready,
+    paths.indices().forall(i =>
+      match paths.nth(i) {
+        | WorkingFile(_) => false
+        | _ => true
+      }
+    ),
     changeCall(id, onReplay(
       { ...calls.get(id), selection: selection }, SavedPaths(paths), range(0, paths.length())
     )),
@@ -634,8 +629,6 @@ module quint_connect {
     match batch.source {
       | SavedItf => true
       | SavedPaths(_) => false
-      | SavedEvidence(saved) =>
-        filesystem.files.keys().contains(fs::evidencePath(saved.root, saved.workspace, tracePosition(batch).trace))
       | GeneratedItf(g) => fs::canReadGeneratedFile(filesystem, g.workspace, tracePosition(batch).trace)
     }
 
@@ -665,14 +658,13 @@ module quint_connect {
   action validateBytes(id: CallId, bytes: fs::Bytes): bool =
     validateTrace(id, validationForBytes(bytes, calls.get(id).selection))
 
-  pure def validateSavedFile(snapshot: fs::FileSystem, path: str, result: SavedReadResult, selection: itf::Selection): ValidationResult = {
-    val location = fs::SavedFile(path)
-    if (not(snapshot.files.keys().contains(location)))
+  pure def validateSavedFile(snapshot: fs::FileSystem, path: fs::FilePath, result: SavedReadResult, selection: itf::Selection): ValidationResult = {
+    if (not(snapshot.files.keys().contains(path)))
       InvalidItf({ location: InvalidFile, cause: "file not found" })
     else
       match result {
         | SavedReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
-        | SavedReadSucceeded => validationForBytes(snapshot.files.get(location), selection)
+        | SavedReadSucceeded => validationForBytes(snapshot.files.get(path), selection)
       }
   }
 
@@ -699,7 +691,6 @@ module quint_connect {
         match batch.source {
           | SavedItf => false
           | SavedPaths(_) => false
-          | SavedEvidence(_) => false
           | GeneratedItf(g) => {
             val trace = tracePosition(batch).trace
             val path = fs::workingPath(g.workspace, trace)
@@ -713,35 +704,6 @@ module quint_connect {
 
   action validateGeneratedDocument(id: CallId, bytes: fs::Bytes): bool = all {
     workingInputMatches(id, bytes),
-    validateBytes(id, bytes),
-  }
-
-  action replayEvidence(
-    id: CallId, artifactRoot: str, workspace: WorkspaceId, trace: TraceId, selection: itf::Selection
-  ): bool = all {
-    calls.get(id).phase == Ready,
-    filesystem.files.keys().contains(fs::evidencePath(artifactRoot, workspace, trace)),
-    changeCall(id, onReplay(
-      { ...calls.get(id), selection: selection }, SavedEvidence({ root: artifactRoot, workspace: workspace }), List(trace)
-    )),
-  }
-
-  def evidenceInputMatches(id: CallId, bytes: fs::Bytes): bool =
-    match calls.get(id).phase {
-      | AwaitingValidation(batch) =>
-        match batch.source {
-          | SavedEvidence(saved) => {
-            val path = fs::evidencePath(saved.root, saved.workspace, tracePosition(batch).trace)
-            if (filesystem.files.keys().contains(path)) filesystem.files.get(path) == bytes
-            else false
-          }
-          | _ => false
-        }
-      | _ => false
-    }
-
-  action validateEvidenceDocument(id: CallId, bytes: fs::Bytes): bool = all {
-    evidenceInputMatches(id, bytes),
     validateBytes(id, bytes),
   }
 
@@ -1061,7 +1023,7 @@ module quint_connect {
   ): bool =
     match storage {
       | StorageSucceeded =>
-        save == ArtifactSaved({ directory: FailureDirectory(g.workspace), trace: position.trace, root: g.artifactRoot })
+        save == ArtifactSaved(fs::evidencePath(g.artifactRoot, g.workspace, position.trace))
       | StorageFailed(cause) => save == ArtifactSaveFailed(cause)
     }
 
@@ -1375,9 +1337,11 @@ module quint_connect {
         startReplay(id, List()),
         startReplay(id, List(0, 1)),
         startReplay(id, List(0, 0)),
-        startReplayPaths(id, List("good.itf.json"), { ...defaultSelection, statePath: List("items") }),
-        startReplayPaths(id, List("good.itf.json", "bad.itf.json"), { ...defaultSelection, statePath: List("items") }),
-        startReplayPaths(id, List("good.itf.json", "missing.itf.json"), { ...defaultSelection, statePath: List("items") }),
+        startReplayPaths(id, List(fs::SavedFile("good.itf.json")), { ...defaultSelection, statePath: List("items") }),
+        startReplayPaths(id, List(fs::SavedFile("good.itf.json"), fs::SavedFile("bad.itf.json")),
+          { ...defaultSelection, statePath: List("items") }),
+        startReplayPaths(id, List(fs::SavedFile("good.itf.json"), fs::SavedFile("missing.itf.json")),
+          { ...defaultSelection, statePath: List("items") }),
         readSavedPath(id, SavedReadSucceeded),
         readSavedPath(id, SavedReadFailed("permission denied")),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(1)),
