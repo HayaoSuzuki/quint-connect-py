@@ -4,7 +4,7 @@ module quint_connect_test {
   import quint_itf as itf from "./quint_itf"
   import quint_values as qv from "./quint_values"
   import quint_connect_documents.* from "./quint_connect"
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), DECODED_DOCUMENTS = decodedDocuments).* from "./quint_connect"
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), DECODED_DOCUMENTS = decodedDocuments, SAVED_INPUTS = Map()).* from "./quint_connect"
 
   pure val simulation: Generation =
     { expectation: SimulationCount(1), seed: sampleSeed, workspace: 1, artifactRoot: defaultArtifactRoot }
@@ -372,4 +372,21 @@ module quint_connect_test {
         location: AtTrace({ trace: 0, traceIndex: 0 }), cause: "invalid JSON",
       }))) and safety)
       .then(createDriver(1, FactorySucceeded(1)).fail())
+
+  run invalidCliLimitsAreRejectedBeforeReservationTest =
+    init
+      .then(startRequestedRun(1, { ...sampleRequest,
+        config: cli::Simulation({
+          init: cli::CliDefault, step: cli::CliDefault, nTraces: cli::CliSpecified(2),
+          maxSamples: cli::CliSpecified(1), maxSteps: cli::CliDefault,
+        }),
+      }, sampleSeed, "evidence", itemsSelection))
+      .then(startRequestedRun(2, { ...sampleRequest,
+        config: cli::Simulation({
+          init: cli::CliDefault, step: cli::CliDefault, nTraces: cli::CliDefault,
+          maxSamples: cli::CliDefault, maxSteps: cli::CliSpecified(-1),
+        }),
+      }, sampleSeed, "evidence", itemsSelection))
+      .expect(finishedAs(1, failed(InvalidRequest(RejectedSampleLimit))) and
+        finishedAs(2, failed(InvalidRequest(RejectedStepLimit))) and filesystem == initialFilesystem and safety)
 }

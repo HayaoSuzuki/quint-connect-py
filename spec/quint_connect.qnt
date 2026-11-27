@@ -47,7 +47,11 @@ module quint_connect {
     artifactRoot: str,
   }
 
-  type Source = SavedItf | SavedEvidence({ root: str, workspace: WorkspaceId }) | GeneratedItf(Generation)
+  type Source =
+    | SavedItf
+    | SavedPaths(List[str])
+    | SavedEvidence({ root: str, workspace: WorkspaceId })
+    | GeneratedItf(Generation)
 
   type TracePosition = {
     trace: TraceId,
@@ -79,7 +83,15 @@ module quint_connect {
   // Internal generation result, with filenames ordered by completeProcessSuccess.
   type GenerationResult = ProcessFailed(str) | ProcessSucceeded(List[TraceId])
 
-  type Location = AtTrace(TracePosition) | AtStep(StepPosition)
+  type SavedTracePosition = { path: str, position: TracePosition }
+
+  type Location =
+    | AtTrace(TracePosition)
+    | AtStep(StepPosition)
+    | AtSavedTrace(SavedTracePosition)
+    | AtSavedStep({ path: str, position: StepPosition })
+
+  type SavedReadResult = SavedReadSucceeded | SavedReadFailed(str)
 
   type TraceError = {
     location: Location,
@@ -154,9 +166,12 @@ module quint_connect {
 
   type SaveResult = ArtifactSaved(Artifact) | ArtifactSaveFailed(str)
 
-  type Artifacts = FromSavedTrace | FromGeneration({ seed: Seed, save: SaveResult })
+  type Artifacts =
+    | FromSavedTrace
+    | FromSavedFile(str)
+    | FromGeneration({ seed: Seed, save: SaveResult })
 
-  type EmptyInput = NoInputPaths | NoGeneratedItf | NoTraceStates(TracePosition)
+  type EmptyInput = NoInputPaths | NoGeneratedItf | NoTraceStates(TracePosition) | NoSavedTraceStates(SavedTracePosition)
 
   type WorkspaceStage = Reserve | Cleanup
 
@@ -195,6 +210,8 @@ module quint_connect {
   // The history records observable calls in order, including calls that fail.
   type Event =
     | ReplayRequested(List[TraceId])
+    | ReplayFilesRequested(List[str])
+    | SavedReadAttempted(SavedTracePosition)
     | CommandPrepared({ request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand })
     | WorkspaceReserved(Generation)
     | GenerationCompleted({ generation: Generation, result: GenerationResult })
@@ -222,6 +239,12 @@ module quint_connect {
   const DRIVER_IDS: Set[DriverId]
   // The reader maps an exact byte sequence to one lossless lexed JSON tree.
   const DECODED_DOCUMENTS: fs::Bytes -> itf::ItfDocument
+  const SAVED_INPUTS: str -> fs::Bytes
+
+  pure val initialFilesystem: fs::FileSystem = {
+    ...fs::emptyFileSystem,
+    files: SAVED_INPUTS.keys().fold(Map(), (acc, path) => acc.put(fs::SavedFile(path), SAVED_INPUTS.get(path))),
+  }
 
   var calls: CallId -> CallState
   var filesystem: fs::FileSystem
@@ -236,7 +259,11 @@ module quint_connect {
     recordEvent(s, Finished(result), Returned(result))
 
   pure def onReplay(s: CallState, source: Source, traces: List[TraceId]): CallState = {
-    val recorded = recordEvent(s, s.phase, ReplayRequested(traces))
+    val request = match source {
+      | SavedPaths(paths) => ReplayFilesRequested(paths)
+      | _ => ReplayRequested(traces)
+    }
+    val recorded = recordEvent(s, s.phase, request)
     if (traces.length() == 0)
       stop(recorded, source, EmptyTrace(NoInputPaths))
     else
@@ -246,6 +273,7 @@ module quint_connect {
   pure def finish(s: CallState, source: Source, result: Outcome): CallState =
     match source {
       | SavedItf => returned(s, result)
+      | SavedPaths(_) => returned(s, result)
       | SavedEvidence(_) => returned(s, result)
       | GeneratedItf(generation) =>
         { ...s, phase: AwaitingCleanup({ generation: generation, result: result }) }
@@ -292,10 +320,29 @@ module quint_connect {
   pure def tracePosition(batch: TraceBatch): TracePosition =
     { trace: batch.traces.nth(batch.traceIndex), traceIndex: batch.traceIndex }
 
-  pure def errorLocation(position: TracePosition, location: ParseLocation): Location =
-    match location {
-      | InvalidFile => AtTrace(position)
-      | InvalidStep(index) => AtStep({ trace: position, stepIndex: index })
+  pure def errorLocation(batch: TraceBatch, location: ParseLocation): Location = {
+    val position = tracePosition(batch)
+    match batch.source {
+      | SavedPaths(paths) => {
+        val path = paths.nth(batch.traceIndex)
+        match location {
+          | InvalidFile => AtSavedTrace({ path: path, position: position })
+          | InvalidStep(index) =>
+            AtSavedStep({ path: path, position: { trace: position, stepIndex: index } })
+        }
+      }
+      | _ =>
+        match location {
+          | InvalidFile => AtTrace(position)
+          | InvalidStep(index) => AtStep({ trace: position, stepIndex: index })
+        }
+    }
+  }
+
+  pure def emptyTraceInput(batch: TraceBatch): EmptyInput =
+    match batch.source {
+      | SavedPaths(paths) => NoSavedTraceStates({ path: paths.nth(batch.traceIndex), position: tracePosition(batch) })
+      | _ => NoTraceStates(tracePosition(batch))
     }
 
   pure def onValidation(s: CallState, batch: TraceBatch, result: ValidationResult): CallState = {
@@ -307,10 +354,10 @@ module quint_connect {
           AwaitingDriver({ batch: batch, steps: steps }),
           TraceValidated({ position: position, steps: steps })
         )
-      | EmptyStates => stop(recorded, batch.source, EmptyTrace(NoTraceStates(position)))
+      | EmptyStates => stop(recorded, batch.source, EmptyTrace(emptyTraceInput(batch)))
       | InvalidItf(error) =>
         stop(recorded, batch.source, TraceFailed({
-          location: errorLocation(position, error.location), cause: error.cause,
+          location: errorLocation(batch, error.location), cause: error.cause,
         }))
     }
   }
@@ -332,7 +379,7 @@ module quint_connect {
         )
       | FactoryFailed(cause) =>
         stop(recorded, validated.batch.source, DriverFailed({
-          location: AtTrace(position), stage: Factory, cause: cause,
+          location: errorLocation(validated.batch, InvalidFile), stage: Factory, cause: cause,
         }))
     }
   }
@@ -350,7 +397,7 @@ module quint_connect {
       | OperationApplied => { ...recorded, phase: AwaitingObservation(active) }
       | OperationFailed(cause) =>
         stop(recorded, active.validated.batch.source, DriverFailed({
-          location: AtStep(context.position), stage: Apply, cause: cause,
+          location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Apply, cause: cause,
         }))
     }
   }
@@ -371,6 +418,9 @@ module quint_connect {
     val recorded = recordEvent(s, s.phase, DifferenceObserved(detail))
     match source {
       | SavedItf => stop(recorded, source, StatesDiffer({ detail: detail, artifacts: FromSavedTrace }))
+      | SavedPaths(paths) => stop(recorded, source, StatesDiffer({
+          detail: detail, artifacts: FromSavedFile(paths.nth(detail.position.trace.traceIndex)),
+        }))
       | SavedEvidence(_) => stop(recorded, source, StatesDiffer({ detail: detail, artifacts: FromSavedTrace }))
       | GeneratedItf(g) => { ...recorded, phase: AwaitingArtifact({ generation: g, detail: detail }) }
     }
@@ -385,7 +435,7 @@ module quint_connect {
       | Observed(actual) =>
         if (not(qv::isUsable(actual)))
           stop(recorded, source, DriverFailed({
-            location: AtStep(context.position), stage: Observe, cause: "invalid driver observation",
+            location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Observe, cause: "invalid driver observation",
           }))
         else if (qv::equalValues(stepData.expected, actual))
           afterMatch(recordEvent(recorded, recorded.phase, ObservationMatched({ position: context.position, actual: actual })), active)
@@ -393,7 +443,7 @@ module quint_connect {
           onMismatch(recorded, source, { position: context.position, step: stepData, actual: actual })
       | ObservationFailed(cause) =>
         stop(recorded, source, DriverFailed({
-          location: AtStep(context.position), stage: Observe, cause: cause,
+          location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Observe, cause: cause,
         }))
     }
   }
@@ -424,7 +474,7 @@ module quint_connect {
 
   action init: bool = all {
     calls' = CALL_IDS.mapBy(_ => { phase: Ready, history: List(), selection: defaultSelection }),
-    filesystem' = fs::emptyFileSystem,
+    filesystem' = initialFilesystem,
   }
 
   action changeCallWithFiles(id: CallId, updated: CallState, snapshot: fs::FileSystem): bool = all {
@@ -450,6 +500,13 @@ module quint_connect {
 
   action startReplay(id: CallId, traces: List[TraceId]): bool =
     startReplayWithSelection(id, traces, defaultSelection)
+
+  action startReplayPaths(id: CallId, paths: List[str], selection: itf::Selection): bool = all {
+    calls.get(id).phase == Ready,
+    changeCall(id, onReplay(
+      { ...calls.get(id), selection: selection }, SavedPaths(paths), range(0, paths.length())
+    )),
+  }
 
   action reserveRun(id: CallId, g: Generation, requestState: CallState): bool = all {
     calls.get(id).phase == Ready,
@@ -576,6 +633,7 @@ module quint_connect {
   def traceIsReadable(batch: TraceBatch): bool =
     match batch.source {
       | SavedItf => true
+      | SavedPaths(_) => false
       | SavedEvidence(saved) =>
         filesystem.files.keys().contains(fs::evidencePath(saved.root, saved.workspace, tracePosition(batch).trace))
       | GeneratedItf(g) => fs::canReadGeneratedFile(filesystem, g.workspace, tracePosition(batch).trace)
@@ -596,17 +654,49 @@ module quint_connect {
   action validateDocument(id: CallId, document: itf::ItfDocument): bool =
     validateTrace(id, fromDecodedTrace(itf::decodeItf(document, calls.get(id).selection)))
 
-  action validateBytes(id: CallId, bytes: fs::Bytes): bool =
+  pure def validationForBytes(bytes: fs::Bytes, selection: itf::Selection): ValidationResult =
     if (DECODED_DOCUMENTS.keys().contains(bytes))
-      validateDocument(id, DECODED_DOCUMENTS.get(bytes))
+      fromDecodedTrace(itf::decodeItf(DECODED_DOCUMENTS.get(bytes), selection))
     else
-      validateTrace(id, InvalidItf({ location: InvalidFile, cause: "invalid JSON" }))
+      InvalidItf({ location: InvalidFile, cause: "invalid JSON" })
+
+  action validateBytes(id: CallId, bytes: fs::Bytes): bool =
+    validateTrace(id, validationForBytes(bytes, calls.get(id).selection))
+
+  pure def validateSavedFile(snapshot: fs::FileSystem, path: str, result: SavedReadResult, selection: itf::Selection): ValidationResult = {
+    val location = fs::SavedFile(path)
+    if (not(snapshot.files.keys().contains(location)))
+      InvalidItf({ location: InvalidFile, cause: "file not found" })
+    else
+      match result {
+        | SavedReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
+        | SavedReadSucceeded => validationForBytes(snapshot.files.get(location), selection)
+      }
+  }
+
+  action readSavedPath(id: CallId, result: SavedReadResult): bool =
+    match calls.get(id).phase {
+      | AwaitingValidation(batch) =>
+        match batch.source {
+          | SavedPaths(paths) => {
+            val current = calls.get(id)
+            val path = paths.nth(batch.traceIndex)
+            val recorded = recordEvent(current, current.phase, SavedReadAttempted({
+              path: path, position: tracePosition(batch),
+            }))
+            changeCall(id, onValidation(recorded, batch, validateSavedFile(filesystem, path, result, current.selection)))
+          }
+          | _ => inapplicable
+        }
+      | _ => inapplicable
+    }
 
   def workingInputMatches(id: CallId, bytes: fs::Bytes): bool =
     match calls.get(id).phase {
       | AwaitingValidation(batch) =>
         match batch.source {
           | SavedItf => false
+          | SavedPaths(_) => false
           | SavedEvidence(_) => false
           | GeneratedItf(g) => {
             val trace = tracePosition(batch).trace
@@ -772,6 +862,7 @@ module quint_connect {
     history.foldl(List(), (traces, event) =>
       match event {
         | ReplayRequested(paths) => paths
+        | ReplayFilesRequested(paths) => range(0, paths.length())
         | GenerationCompleted(completed) =>
           match completed.result {
             | ProcessFailed(_) => List()
@@ -807,6 +898,32 @@ module quint_connect {
     else
       false
   }
+
+  pure def requestedSavedPath(history: List[Event], index: int, file: SavedTracePosition): bool =
+    hasPrior(history, index, event =>
+      match event {
+        | ReplayFilesRequested(paths) =>
+          if (paths.indices().contains(file.position.traceIndex))
+            paths.nth(file.position.traceIndex) == file.path
+          else false
+        | _ => false
+      }
+    )
+
+  pure def validationFollowsInput(history: List[Event], index: int, position: TracePosition): bool =
+    if (hasPrior(history, index, event =>
+      match event {
+        | ReplayFilesRequested(_) => true
+        | _ => false
+      }
+    ))
+      previousIs(history, index, event =>
+        match event {
+          | SavedReadAttempted(file) => file.position == position
+          | _ => false
+        }
+      )
+    else traceIsNext(history, index, position)
 
   pure def driverOwnsStep(history: List[Event], index: int, ctx: DriverStep): bool =
     hasPrior(history, index, event => event == DriverCreated({ trace: ctx.position.trace, driver: ctx.driver }))
@@ -857,7 +974,9 @@ module quint_connect {
 
   pure def replayEventInOrder(history: List[Event], index: int): bool =
     match history.nth(index) {
-      | ValidationAttempted(position) => traceIsNext(history, index, position)
+      | SavedReadAttempted(file) =>
+        requestedSavedPath(history, index, file) and traceIsNext(history, index, file.position)
+      | ValidationAttempted(position) => validationFollowsInput(history, index, position)
       | TraceValidated(validated) =>
         validated.steps.length() > 0 and
           previousIs(history, index, event => event == ValidationAttempted(validated.position))
@@ -953,6 +1072,9 @@ module quint_connect {
             | _ => false
           }
         )
+      | FromSavedFile(path) =>
+        requestedSavedPath(history, index, { path: path, position: mismatch.position.trace }) and
+          hasPrior(history, index, event => event == SavedReadAttempted({ path: path, position: mismatch.position.trace }))
       | FromGeneration(detail) =>
         previousIs(history, index, event =>
           match event {
@@ -1186,7 +1308,7 @@ module quint_connect {
     mismatchKeepsEvidence,
     consistentResult,
     isolatedResources,
-    fs::fileSystemSafety(filesystem, fs::emptyFileSystem),
+    fs::fileSystemSafety(filesystem, initialFilesystem),
     persistedEvidence,
   }
 
@@ -1251,6 +1373,10 @@ module quint_connect {
         startReplay(id, List()),
         startReplay(id, List(0, 1)),
         startReplay(id, List(0, 0)),
+        startReplayPaths(id, List("good.itf.json", "bad.itf.json"), { ...defaultSelection, statePath: List("items") }),
+        startReplayPaths(id, List("good.itf.json", "missing.itf.json"), { ...defaultSelection, statePath: List("items") }),
+        readSavedPath(id, SavedReadSucceeded),
+        readSavedPath(id, SavedReadFailed("permission denied")),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(1)),
           sampleSeed, defaultArtifactRoot, { ...defaultSelection, statePath: List("items") }),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(2)),
@@ -1362,17 +1488,25 @@ module quint_connect_documents {
     ),
   }
 
+  pure val savedInputs: str -> fs::Bytes = Map(
+    "good.itf.json" -> originalBytes,
+    "bad.itf.json" -> List(123),
+    "empty.itf.json" -> otherBytes,
+    "named.itf.json" -> namedBytes,
+  )
+
   pure val decodedDocuments: fs::Bytes -> itf::ItfDocument =
     Map(originalBytes -> compoundDocument, otherBytes -> emptyDocument, namedBytes -> namedDocument)
 }
 
 module quint_connect_sample {
   import quint_connect_documents.*
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), DECODED_DOCUMENTS = decodedDocuments).*
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), DECODED_DOCUMENTS = decodedDocuments, SAVED_INPUTS = savedInputs).*
 
   observation replayStarted = anyCallHas(event =>
     match event {
       | ReplayRequested(paths) => paths.length() > 0
+      | ReplayFilesRequested(paths) => paths.length() > 0
       | _ => false
     }
   )
