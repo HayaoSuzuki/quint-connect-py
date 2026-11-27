@@ -73,6 +73,25 @@ for backend in rust typescript; do
 done
 ```
 
+## モデル検査
+
+Quint 0.34.0 の `verify` で、ファイルシステム単体と PATH 探索を検査した。TLC によるファイルシステムの全探索は、異なる状態251,635件を調べ、状態グラフの探索深さ21で完了した。モデルの入力範囲で、作業先と成果物の所有、保存するバイト列、掃除後のファイル状態に対する `safety` の反例はなかった。遷移で使う値だけを各分岐で選ぶようにし、同じ遷移の重複列挙を減らした。Apalache で同じ不変条件を深さ3と5まで検査した試行は、それぞれ4分の制限時間内に完了しなかった。
+
+[PATH 探索の検査モデル](../../../../spec/quint_path_search_verify.qnt)では、空・相対・絶対の3候補それぞれに対して、実行可能、拒否、不在を組み合わせた27通りを検査した。TLC と Apalache の両方で、最初の実行可能候補、見つからない場合の診断、調べた候補の範囲が期待どおりだった。候補に対する OS の応答はモデルの入力とした。
+
+Java が `PATH` から実行できる環境で、次のコマンドを使う。
+
+```bash
+quint verify spec/quint_filesystem.qnt --main=quint_filesystem_sample \
+  --invariant=safety --backend=tlc --verbosity=3
+quint verify spec/quint_path_search_verify.qnt \
+  --invariant=searchAgreesWithPathOrder --backend=tlc --verbosity=3
+quint verify spec/quint_path_search_verify.qnt \
+  --invariant=searchAgreesWithPathOrder --backend=apalache --max-steps=0
+```
+
+二件・四件の結合モデルには、Apalache を深さ1で試した。四件モデルには `--step=startTogether` を使った。Quint 0.34.0 のコンパイラがモジュールをフラット化する段階で、名前付き import の参照に `QNT404` を返し、モデル検査器に到達しなかった。[Quint の類似報告](https://github.com/quint-co/quint/issues/1715)
+
 ## Issue #1 の受け入れ条件
 
 | 受け入れ条件 | Quint で検査した振る舞い | 実装後の確認 |
