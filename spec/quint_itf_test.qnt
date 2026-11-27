@@ -67,7 +67,7 @@ module quint_itf_test {
       RawObject(List((countName, 3), (mbtAction, 4), (mbtPicks, 5))), // 6
       RawText(List(49)), // 7
       RawObject(List((bigintKey, 7))), // 8
-      RawText(List()), // 9
+      RawBoolean(false), // 9
       RawObject(List((countName, 8), (mbtAction, 9), (mbtPicks, 5))), // 10
       RawText(List(50)), // 11
       RawObject(List((bigintKey, 11))), // 12
@@ -173,6 +173,64 @@ module quint_itf_test {
 
   run mbtOptionsAffectOnlyImmediateNamedArgumentsTest =
     assert(oneStepMatches(decodeItf(richTrace, mbtSelection), validMbtStep))
+
+  run mbtAnonymousActionIsPreservedTest = {
+    val anonymous = {
+      nodes: List(
+        RawArray(List()), // 0
+        RawText(List()), // 1
+        RawObject(List()), // 2
+        RawObject(List((tagKey, 1), (valueKey, 2))), // 3
+        RawObject(List((mbtAction, 1), (mbtPicks, 2), (dispatchName, 3))), // 4
+        RawArray(List(4)), // 5
+        RawObject(List((varsKey, 0), (statesKey, 5))), // 6
+      ),
+      root: 6,
+    }
+    assert(and {
+      oneStepMatches(decodeItf(anonymous, defaults), stepData =>
+        stepData.name == List() and stepData.arguments == Map()
+      ),
+      decodeItf(anonymous, { ...defaults, actionPath: List(dispatchName) }) ==
+        InvalidTrace(AtState({ index: 0, problem: InvalidOperation })),
+    })
+  }
+
+  run decodedArgumentsAndExpectedValueNormalizeNestedSetsAndIntegersTest = {
+    val document = {
+      nodes: List(
+        RawText(countName), // 0
+        RawArray(List(0)), // 1
+        RawText(List(48)), // 2
+        RawObject(List((bigintKey, 2))), // 3
+        RawText(List(45, 48, 48)), // 4
+        RawObject(List((bigintKey, 4))), // 5
+        RawArray(List(3, 5)), // 6
+        RawObject(List((setKey, 6))), // 7
+        RawText(List(45, 48, 48, 55)), // 8
+        RawObject(List((bigintKey, 8))), // 9
+        RawArray(List(7, 9)), // 10
+        RawText(initName), // 11
+        RawObject(List((usedName, 10))), // 12
+        RawObject(List((countName, 10), (mbtAction, 11), (mbtPicks, 12))), // 13
+        RawArray(List(13)), // 14
+        RawObject(List((varsKey, 1), (statesKey, 14))), // 15
+      ),
+      root: 15,
+    }
+    val selection = { ...defaults, statePath: List(countName) }
+    assert(oneStepMatches(decodeItf(document, selection), stepData => {
+      val argument = stepData.arguments.get(usedName)
+      and {
+        argument == stepData.expected,
+        argument.root == 10,
+        argument.nodes.nth(10) == ListNode(List(7, 9)),
+        argument.nodes.nth(7) == SetNode(List(3)),
+        argument.nodes.nth(3) == IntegerNode({ negative: false, digits: List(0) }),
+        argument.nodes.nth(9) == IntegerNode({ negative: true, digits: List(7) }),
+      }
+    }))
+  }
 
   run explicitPathWinsAndEmptyTupleMeansNoArgumentsTest =
     assert(oneStepMatches(decodeItf(richTrace, explicitSelection), stepData =>

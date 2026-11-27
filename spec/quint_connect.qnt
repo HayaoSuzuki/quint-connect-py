@@ -502,14 +502,17 @@ module quint_connect {
     val recorded = recordEvent(s, s.phase, ObservationCalled({ context: context, expected: stepData.expected }))
     match result {
       | Observed(actual) =>
-        if (not(qv::isUsable(actual)))
-          stop(recorded, source, DriverFailed({
-            location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Observe, cause: "invalid driver observation",
-          }))
-        else if (qv::equalValues(stepData.expected, actual))
-          afterMatch(recordEvent(recorded, recorded.phase, ObservationMatched({ position: context.position, actual: actual })), active)
-        else
-          onMismatch(recorded, source, { position: context.position, step: stepData, actual: actual })
+        match qv::prepareObservableValue(actual) {
+          | InvalidObservableValue =>
+            stop(recorded, source, DriverFailed({
+              location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Observe, cause: "invalid driver observation",
+            }))
+          | NormalizedObservableValue(normalized) =>
+            if (qv::equalValues(stepData.expected, normalized))
+              afterMatch(recordEvent(recorded, recorded.phase, ObservationMatched({ position: context.position, actual: normalized })), active)
+            else
+              onMismatch(recorded, source, { position: context.position, step: stepData, actual: normalized })
+        }
       | ObservationFailed(cause) =>
         stop(recorded, source, DriverFailed({
           location: errorLocation(active.validated.batch, InvalidStep(active.stepIndex)), stage: Observe, cause: cause,

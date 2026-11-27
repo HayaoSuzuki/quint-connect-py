@@ -7,6 +7,241 @@
             "call_id": 1,
             "events": [
               {
+                "tag": "SavedReadAttempted",
+                "value": {
+                  "path": {
+                    "tag": "SavedFile",
+                    "value": "anonymous-operation.itf.json"
+                  },
+                  "position": {
+                    "trace": 0,
+                    "traceIndex": 0
+                  }
+                }
+              },
+              {
+                "tag": "FactoryCalled",
+                "value": {
+                  "trace": 0,
+                  "traceIndex": 0
+                }
+              },
+              {
+                "tag": "DriverCreated",
+                "value": {
+                  "driver": 1,
+                  "trace": {
+                    "trace": 0,
+                    "traceIndex": 0
+                  }
+                }
+              },
+              {
+                "tag": "OperationCalled",
+                "value": {
+                  "context": {
+                    "driver": 1,
+                    "position": {
+                      "stepIndex": 0,
+                      "trace": {
+                        "trace": 0,
+                        "traceIndex": 0
+                      }
+                    }
+                  },
+                  "operation": {
+                    "arguments": {
+                      "items": {
+                        "#set": [
+                          {
+                            "#bigint": "0"
+                          }
+                        ]
+                      }
+                    },
+                    "name": ""
+                  }
+                }
+              },
+              {
+                "tag": "ObservationCalled",
+                "value": {
+                  "context": {
+                    "driver": 1,
+                    "position": {
+                      "stepIndex": 0,
+                      "trace": {
+                        "trace": 0,
+                        "traceIndex": 0
+                      }
+                    }
+                  },
+                  "expected": {
+                    "#bigint": "1"
+                  }
+                }
+              }
+            ],
+            "outcome": {
+              "tag": "Failed",
+              "value": {
+                "cleanup": {
+                  "tag": "NoCleanupError",
+                  "value": null
+                },
+                "error": {
+                  "tag": "StatesDiffer",
+                  "value": {
+                    "artifacts": {
+                      "tag": "FromSavedFile",
+                      "value": {
+                        "tag": "SavedFile",
+                        "value": "anonymous-operation.itf.json"
+                      }
+                    },
+                    "detail": {
+                      "actual": {
+                        "#set": [
+                          {
+                            "#bigint": "0"
+                          }
+                        ]
+                      },
+                      "position": {
+                        "stepIndex": 0,
+                        "trace": {
+                          "trace": 0,
+                          "traceIndex": 0
+                        }
+                      },
+                      "step": {
+                        "expected": {
+                          "#bigint": "1"
+                        },
+                        "operation": {
+                          "arguments": {
+                            "items": {
+                              "#set": [
+                                {
+                                  "#bigint": "0"
+                                }
+                              ]
+                            }
+                          },
+                          "name": ""
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "remaining_workspace_files": [],
+        "saved_files": []
+      },
+      "input_files": [
+        {
+          "bytes": [123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 110, 34, 93, 44, 34, 115, 116, 97, 116, 101, 115, 34, 58, 91, 123, 34, 110, 34, 58, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 48, 48, 48, 49, 34, 125, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107, 101, 110, 34, 58, 34, 34, 44, 34, 109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115, 34, 58, 123, 34, 105, 116, 101, 109, 115, 34, 58, 123, 34, 116, 97, 103, 34, 58, 34, 83, 111, 109, 101, 34, 44, 34, 118, 97, 108, 117, 101, 34, 58, 123, 34, 35, 115, 101, 116, 34, 58, 91, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 48, 34, 125, 44, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 45, 48, 48, 34, 125, 93, 125, 125, 125, 125, 93, 125, 10],
+          "path": {
+            "tag": "SavedFile",
+            "value": "anonymous-operation.itf.json"
+          }
+        }
+      ],
+      "name": "anonymousOperationNormalizesMismatchValues",
+      "schedule": [
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Start",
+            "value": {
+              "tag": "ReplayPaths",
+              "value": {
+                "paths": [
+                  "anonymous-operation.itf.json"
+                ],
+                "selection": {
+                  "actionPath": [],
+                  "statePath": [
+                    "n"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "SavedRead",
+              "value": {
+                "tag": "ReadSucceeded",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverFactory",
+              "value": {
+                "tag": "FactorySucceeded",
+                "value": 1
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverApply",
+              "value": {
+                "tag": "OperationApplied",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverObserve",
+              "value": {
+                "tag": "Observed",
+                "value": {
+                  "#set": [
+                    {
+                      "#bigint": "-00"
+                    },
+                    {
+                      "#bigint": "0"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "calls": [
+          {
+            "call_id": 1,
+            "events": [
+              {
                 "tag": "CommandPrepared",
                 "value": {
                   "command": {

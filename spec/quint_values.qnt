@@ -33,7 +33,8 @@ module quint_values {
     val digits = number.digits.foldl(List(), (significant, digit) =>
       if (significant.length() == 0 and digit == 0) significant
       else significant.append(digit))
-    { negative: number.negative and digits.length() > 0, digits: digits }
+    if (digits.length() == 0) { negative: false, digits: List(0) }
+    else { negative: number.negative, digits: digits }
   }
 
   // Children of canonical nodes use IDs from one shared pool. The tags
@@ -117,16 +118,58 @@ module quint_values {
 
   // Only the selected root needs to be usable. Unusable nodes reached from
   // that root invalidate their parents as the fold processes them.
-  pure def canonicalize(value: ItfValue, pool: NodePool): { pool: NodePool, root: NodeId } =
-    if (value.root < 0 or value.root >= value.nodes.length()) { pool: pool, root: invalidNodeId }
+  pure def canonicalize(
+    value: ItfValue, pool: NodePool
+  ): { pool: NodePool, root: NodeId, nodeIds: List[NodeId] } =
+    if (value.root < 0 or value.root >= value.nodes.length())
+      { pool: pool, root: invalidNodeId, nodeIds: List() }
     else {
       val initial: Canonicalization = { pool: pool, nodeIds: List() }
       val result = value.nodes.slice(0, value.root + 1).foldl(initial, intern)
-      { pool: result.pool, root: result.nodeIds.nth(value.root) }
+      { pool: result.pool, root: result.nodeIds.nth(value.root), nodeIds: result.nodeIds }
     }
 
   pure def isUsable(value: ItfValue): bool =
     canonicalize(value, emptyNodePool).root != invalidNodeId
+
+  pure def uniqueSetChildren(children: List[NodeId], nodeIds: List[NodeId]): List[NodeId] =
+    children.foldl({ seen: Set(), kept: List() }, (acc, child) => {
+      val id = nodeIds.nth(child)
+      if (acc.seen.contains(id)) acc
+      else { seen: acc.seen.union(Set(id)), kept: acc.kept.append(child) }
+    }).kept
+
+  pure def normalizedNode(node: ValueNode, nodeIds: List[NodeId]): ValueNode =
+    match node {
+      | IntegerNode(number) => IntegerNode(normalizeDecimal(number))
+      | SetNode(children) => SetNode(uniqueSetChildren(children, nodeIds))
+      | _ => node
+    }
+
+  type ObservableValue = InvalidObservableValue | NormalizedObservableValue(ItfValue)
+
+  // Preserve node references. Keep the first representative of each equivalent set element.
+  pure def prepareObservableValue(value: ItfValue): ObservableValue = {
+    val canonical = canonicalize(value, emptyNodePool)
+    if (canonical.root == invalidNodeId) InvalidObservableValue
+    else {
+      val nodes = range(0, value.root + 1).foldl(value.nodes, (acc, index) =>
+        if (canonical.nodeIds.nth(index) == invalidNodeId) acc
+        else {
+          val node = value.nodes.nth(index)
+          val normalized = normalizedNode(node, canonical.nodeIds)
+          if (node == normalized) acc else acc.replaceAt(index, normalized)
+        }
+      )
+      NormalizedObservableValue({ ...value, nodes: nodes })
+    }
+  }
+
+  pure def normalizeObservableValue(value: ItfValue): ItfValue =
+    match prepareObservableValue(value) {
+      | NormalizedObservableValue(normalized) => normalized
+      | InvalidObservableValue => value
+    }
 
   pure def equalValues(left: ItfValue, right: ItfValue): bool = {
     val leftResult = canonicalize(left, emptyNodePool)

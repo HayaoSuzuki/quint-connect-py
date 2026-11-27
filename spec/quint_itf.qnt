@@ -244,7 +244,7 @@ module quint_itf {
       | Name(text) =>
         match payload {
           | Fields(members) =>
-            if (text.length() == 0) NoOperation else OperationFound({ name: text, members: members })
+            OperationFound({ name: text, members: members })
           | NotObject => NoOperation
         }
       | NotText => NoOperation
@@ -262,11 +262,11 @@ module quint_itf {
       | FoundRef(id) =>
         match fieldsAt(document, id) {
           | Fields(members) =>
-            if (members.keys() == Set(tagKey, valueKey))
-              chosenOperation(
-                textAt(document, fieldAt(members, tagKey)),
-                operationPayload(document, fieldAt(members, valueKey))
-              )
+            if (members.keys() == Set(tagKey, valueKey)) {
+              val name = textAt(document, fieldAt(members, tagKey))
+              if (name == Name(List())) NoOperation
+              else chosenOperation(name, operationPayload(document, fieldAt(members, valueKey)))
+            }
             else NoOperation
           | NotObject => NoOperation
         }
@@ -301,10 +301,11 @@ module quint_itf {
         | Arguments(values) =>
           match argumentAt(document, members.get(key)) {
             | OmitArgument => Arguments(values)
-            | TakeArgument(id) => {
-              val decoded = { nodes: nodes, root: id }
-              if (isUsable(decoded)) Arguments(values.put(key, decoded)) else BadArguments
-            }
+            | TakeArgument(id) =>
+              match prepareObservableValue({ nodes: nodes, root: id }) {
+                | NormalizedObservableValue(value) => Arguments(values.put(key, value))
+                | InvalidObservableValue => BadArguments
+              }
           }
       }
     )
@@ -337,13 +338,12 @@ module quint_itf {
             | OperationFound(operation) =>
               match decodeArguments(document, nodes, operation.members) {
                 | BadArguments => StepRejected(InvalidArgument)
-                | Arguments(arguments) => {
-                  val expected = expectedValue(document, nodes, id, members, selection.statePath)
-                  if (isUsable(expected))
-                    StepDecoded({ name: operation.name, arguments: arguments, expected: expected })
-                  else
-                    StepRejected(InvalidExpectedValue)
-                }
+                | Arguments(arguments) =>
+                  match prepareObservableValue(expectedValue(document, nodes, id, members, selection.statePath)) {
+                    | NormalizedObservableValue(expected) =>
+                      StepDecoded({ name: operation.name, arguments: arguments, expected: expected })
+                    | InvalidObservableValue => StepRejected(InvalidExpectedValue)
+                  }
               }
           }
         }

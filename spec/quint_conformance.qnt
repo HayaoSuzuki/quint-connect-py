@@ -33,8 +33,23 @@ module quint_conformance_documents {
     116, 114, 117, 101, 125, 93, 125, 125, 125, 93, 125, 10,
   )
 
+  // An anonymous MBT operation takes items = { 0, -00 } and expects n = 0001.
+  pure val anonymousOperationBytes: fs::Bytes = List(
+    123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 110, 34, 93, 44, 34, 115, 116, 97, 116, 101, 115,
+    34, 58, 91, 123, 34, 110, 34, 58, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 48,
+    48, 48, 49, 34, 125, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107,
+    101, 110, 34, 58, 34, 34, 44, 34, 109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105,
+    99, 107, 115, 34, 58, 123, 34, 105, 116, 101, 109, 115, 34, 58, 123, 34, 116, 97, 103, 34, 58,
+    34, 83, 111, 109, 101, 34, 44, 34, 118, 97, 108, 117, 101, 34, 58, 123, 34, 35, 115, 101, 116,
+    34, 58, 91, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 48, 34, 125, 44, 123, 34,
+    35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 45, 48, 48, 34, 125, 93, 125, 125, 125, 125, 93,
+    125, 10,
+  )
+
   pure val fixtureSavedInputs: str -> fs::Bytes =
-    savedInputs.put("multistep.itf.json", multistepBytes).put("nested-mutation.itf.json", nestedMutationBytes)
+    savedInputs.put("multistep.itf.json", multistepBytes)
+      .put("nested-mutation.itf.json", nestedMutationBytes)
+      .put("anonymous-operation.itf.json", anonymousOperationBytes)
 }
 
 module quint_conformance {
@@ -228,6 +243,46 @@ module quint_conformance {
       })))
       .then(respond(DriverObserve(Observed(integerDigit(0)))))
       .expect(completedFixture and mismatchHasOriginalArguments)
+
+  pure val observedDuplicateSet: Value = {
+    nodes: List(
+      qv::IntegerNode({ negative: false, digits: List(0) }),
+      qv::IntegerNode({ negative: true, digits: List(0, 0) }),
+      qv::SetNode(List(0, 1)),
+    ),
+    root: 2,
+  }
+
+  val anonymousMismatchHasNormalizedValues: bool =
+    hasEvent(calls.get(1).history, event =>
+      match event {
+        | DifferenceObserved(mismatch) => {
+          val argument = mismatch.step.operation.arguments.get(itemsArgument)
+          mismatch.step.operation.name == List() and
+            (match argument.nodes.nth(argument.root) {
+              | SetNode(children) => children.length() == 1 and argument.nodes.nth(children.head()) ==
+                  qv::IntegerNode({ negative: false, digits: List(0) })
+              | _ => false
+            }) and
+            mismatch.step.expected.nodes.nth(mismatch.step.expected.root) == qv::IntegerNode({ negative: false, digits: List(1) }) and
+            mismatch.actual == {
+              ...observedDuplicateSet, nodes: List(
+                qv::IntegerNode({ negative: false, digits: List(0) }),
+                qv::IntegerNode({ negative: false, digits: List(0) }),
+                qv::SetNode(List(0)),
+              ),
+            }
+        }
+        | _ => false
+      })
+
+  run anonymousOperationNormalizesMismatchValuesTest =
+    initialize(ReplayPaths({ paths: List("anonymous-operation.itf.json"), selection: counterSelection }))
+      .then(respond(SavedRead(ReadSucceeded)))
+      .then(respond(DriverFactory(FactorySucceeded(1))))
+      .then(respond(DriverApply(OperationApplied)))
+      .then(respond(DriverObserve(Observed(observedDuplicateSet))))
+      .expect(completedFixture and anonymousMismatchHasNormalizedValues)
 
   run namedGeneratedReplayTest =
     initialize(generatedRequest(namedTestConfig, namedSelection))

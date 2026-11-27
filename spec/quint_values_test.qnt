@@ -39,6 +39,27 @@ module quint_values_test {
     }
   }
 
+  run observableNormalizationCollapsesEquivalentNestedSetElementsTest = {
+    val zero = IntegerNode({ negative: false, digits: List(0) })
+    val value = {
+      nodes: List(
+        IntegerNode({ negative: true, digits: List(0, 0) }), zero, BooleanNode(false),
+        SetNode(List(0, 2, 1)), SetNode(List(2, 1)),
+        TupleNode(List(3)), TupleNode(List(4)), SetNode(List(5, 6)),
+      ),
+      root: 7,
+    }
+    val normalized = normalizeObservableValue(value)
+    all {
+      normalized.root == 7,
+      normalized.nodes.nth(0) == zero,
+      normalized.nodes.nth(3) == SetNode(List(0, 2)),
+      normalized.nodes.nth(7) == SetNode(List(5)),
+      normalizeObservableValue(normalized) == normalized,
+      equalValues(value, normalized),
+    }
+  }
+
   run strictTypesTest = {
     val one = atom(IntegerNode({ negative: false, digits: List(1) }))
     val record = {
