@@ -633,26 +633,35 @@ module quint_filesystem_sample {
 
   action step: bool = {
     nondet workspace = Set(1, 2).oneOf()
-    nondet count = 0.to(4).oneOf()
-    nondet artifactRoot = Set(root, alternateRoot).oneOf()
-    nondet candidate = Set(1, 2, occupiedDirectory, emptyOccupiedDirectory).oneOf()
     val otherWorkspace = if (workspace == 1) 2 else 1
     val bytes = if (workspace == 1) bytesOfFirstCall else bytesOfSecondCall
     any {
-      reserve(workspace, workspace, List("4", "2"), artifactRoot),
+      {
+        nondet artifactRoot = Set(root, alternateRoot).oneOf()
+        reserve(workspace, workspace, List("4", "2"), artifactRoot)
+      },
       generate(workspace, GeneratedFiles(Map(trace -> bytes, 2 -> List(0, 255)))),
       generate(workspace, AbortedFiles(Map(trace -> bytes.slice(0, 1)))),
       createWorkspaceAlias(workspace, workspace, 3, evidencePath(root, otherWorkspace, trace)),
       createWorkspaceNonFile(workspace, workspace, 4, WorkspaceDirectory),
       createWorkspaceNonFile(workspace, workspace, 5, WorkspaceSpecial),
-      reserveArtifact(workspace, candidate),
+      {
+        nondet candidate = Set(1, 2, occupiedDirectory, emptyOccupiedDirectory).oneOf()
+        reserveArtifact(workspace, candidate)
+      },
       stageReserved(workspace, trace),
       stage(workspace, trace),
-      writeCopy(workspace, count),
+      {
+        nondet count = 0.to(4).oneOf()
+        writeCopy(workspace, count)
+      },
       publish(workspace),
       abandon(workspace),
       retain(workspace, trace, CopyComplete),
-      retain(workspace, trace, CopyInterrupted(count)),
+      {
+        nondet count = 0.to(4).oneOf()
+        retain(workspace, trace, CopyInterrupted(count))
+      },
       cleanup(workspace, RemoveComplete),
       cleanup(workspace, RemoveInterrupted(Set(trace))),
       cleanup(workspace, RemoveInterrupted(Set(3))),
