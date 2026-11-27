@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Protocol, TypedDict, cast, overload
+from typing import TYPE_CHECKING, Protocol, Required, TypedDict, Unpack, cast, overload
 
 from . import _native
 from ._diagnostics import detail_logging_enabled, logging_enabled
@@ -222,6 +222,25 @@ def _context_factory(
     raise TypeError(message)
 
 
+if TYPE_CHECKING:
+    from typing_extensions import TypedDict as _KeywordDict
+
+    # Closed keyword groups keep overloads compatible with the explicit signatures.
+    # The backport is only needed by type checkers targeting Python 3.14.
+    class _SelectionKeywords(_KeywordDict, total=False):
+        action_path: Sequence[str]
+        state_path: Sequence[str]
+
+    class _ReplayKeywords(_SelectionKeywords, closed=True):
+        pass
+
+    class _RunKeywords(_SelectionKeywords, total=False, closed=True):
+        quint: Required[FilePath]
+        seed: int | None
+        backend: Backend | None
+        artifact_dir: FilePath | None
+
+
 @overload
 def replay(
     traces: FilePath | Sequence[FilePath],
@@ -229,8 +248,7 @@ def replay(
     *,
     driver_context: None = None,
     comparison: StateComparison | None = _DEFAULT_COMPARISON,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
+    **kwargs: Unpack[_ReplayKeywords],
 ) -> None: ...
 
 
@@ -241,8 +259,7 @@ def replay(
     *,
     driver_context: _DriverContextFactory[Driver],
     comparison: StateComparison | None = _DEFAULT_COMPARISON,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
+    **kwargs: Unpack[_ReplayKeywords],
 ) -> None: ...
 
 
@@ -253,8 +270,7 @@ def replay(
     *,
     driver_context: None = None,
     comparison: None,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
+    **kwargs: Unpack[_ReplayKeywords],
 ) -> None: ...
 
 
@@ -265,8 +281,7 @@ def replay(
     *,
     driver_context: _DriverContextFactory[ActionDriver],
     comparison: None,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
+    **kwargs: Unpack[_ReplayKeywords],
 ) -> None: ...
 
 
@@ -294,12 +309,7 @@ def run(
     *,
     driver_context: None = None,
     comparison: StateComparison | None = _DEFAULT_COMPARISON,
-    quint: FilePath,
-    seed: int | None = None,
-    backend: Backend | None = None,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
-    artifact_dir: FilePath | None = None,
+    **kwargs: Unpack[_RunKeywords],
 ) -> None: ...
 
 
@@ -310,12 +320,7 @@ def run(
     *,
     driver_context: _DriverContextFactory[Driver],
     comparison: StateComparison | None = _DEFAULT_COMPARISON,
-    quint: FilePath,
-    seed: int | None = None,
-    backend: Backend | None = None,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
-    artifact_dir: FilePath | None = None,
+    **kwargs: Unpack[_RunKeywords],
 ) -> None: ...
 
 
@@ -326,12 +331,7 @@ def run(
     *,
     driver_context: None = None,
     comparison: None,
-    quint: FilePath,
-    seed: int | None = None,
-    backend: Backend | None = None,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
-    artifact_dir: FilePath | None = None,
+    **kwargs: Unpack[_RunKeywords],
 ) -> None: ...
 
 
@@ -342,12 +342,7 @@ def run(
     *,
     driver_context: _DriverContextFactory[ActionDriver],
     comparison: None,
-    quint: FilePath,
-    seed: int | None = None,
-    backend: Backend | None = None,
-    action_path: Sequence[str] = (),
-    state_path: Sequence[str] = (),
-    artifact_dir: FilePath | None = None,
+    **kwargs: Unpack[_RunKeywords],
 ) -> None: ...
 
 
