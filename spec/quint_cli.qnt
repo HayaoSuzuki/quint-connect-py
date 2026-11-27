@@ -62,6 +62,9 @@ module quint_cli {
     argv: List[CliArgument],
   }
 
+  // One process argument is text or a path in the host's native representation.
+  type OsArgument = OsText(List[int]) | OsPath(ResolvedPath)
+
   type CommandResult =
     | CommandReady(QuintCommand)
     | InvalidSeed
@@ -201,6 +204,38 @@ module quint_cli {
       }
     }
   }
+
+  // The admitted limits are nonnegative and have at most 16 decimal digits.
+  pure def limitCodePoints(value: int): List[int] =
+    if (value == 0) List(48)
+    else range(0, 16).foldl({ remaining: value, points: List() }, (decimal, _) =>
+      if (decimal.remaining == 0) decimal
+      else {
+        val quotient = decimal.remaining / 10
+        val digit = decimal.remaining - 10 * quotient
+        { remaining: quotient, points: List(48 + digit).concat(decimal.points) }
+      }
+    ).points
+
+  pure def osOption(flag: List[int], value: List[int]): OsArgument =
+    OsText(flag.append(61).concat(value)) // ASCII '='
+
+  pure def osArgument(argument: CliArgument, codePoints: (str) => List[int]): OsArgument =
+    match argument {
+      | LiteralArgument(value) => OsText(codePoints(value))
+      | ModelArgument(path) => OsPath(path)
+      | StringOption(option) => osOption(codePoints(option.flag), codePoints(option.value))
+      | IntegerOption(option) => osOption(codePoints(option.flag), limitCodePoints(option.value))
+      | SeedOption(digits) => osOption(codePoints("--seed"),
+          digits.foldl(List(), (points, digit) => points.append(48 + decimalDigitValues.get(digit))))
+      | MatchOption(pattern) => osOption(codePoints("--match"), pattern)
+    }
+
+  // For a ready command, serialize the argument vector passed alongside the executable.
+  // codePoints exposes the original Unicode text of Quint's opaque strings. The host
+  // adapter encodes each OsText and renders each OsPath as one native argument.
+  pure def osArgv(command: QuintCommand, codePoints: (str) => List[int]): List[OsArgument] =
+    command.argv.foldl(List(), (argv, argument) => argv.append(osArgument(argument, codePoints)))
 
   // The adapter classifies each workspace entry without following symlinks.
   type GeneratedEntryKind = RegularFile | Directory | Symlink | Other

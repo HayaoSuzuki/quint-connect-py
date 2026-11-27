@@ -177,6 +177,85 @@ module quint_cli_test {
       List(94, 92, 94, 92, 36, 92, 92, 92, 46, 92, 42, 92, 43, 92, 63, 92, 40, 92,
         41, 92, 91, 92, 93, 92, 123, 92, 125, 92, 124, 47, 233, 36)
 
+  // Quint strings are opaque. This fixture supplies their code points at the adapter boundary.
+  pure val argumentText: str -> List[int] = Map(
+    "run" -> List(114, 117, 110),
+    "test" -> List(116, 101, 115, 116),
+    "--mbt" -> List(45, 45, 109, 98, 116),
+    "--out-itf" -> List(45, 45, 111, 117, 116, 45, 105, 116, 102),
+    "trace_{seq}.itf.json" -> List(116, 114, 97, 99, 101, 95, 123, 115, 101, 113, 125, 46, 105, 116, 102, 46, 106, 115, 111, 110),
+    "--seed" -> List(45, 45, 115, 101, 101, 100),
+    "--n-traces" -> List(45, 45, 110, 45, 116, 114, 97, 99, 101, 115),
+    "--max-samples" -> List(45, 45, 109, 97, 120, 45, 115, 97, 109, 112, 108, 101, 115),
+    "--max-steps" -> List(45, 45, 109, 97, 120, 45, 115, 116, 101, 112, 115),
+    "--main" -> List(45, 45, 109, 97, 105, 110),
+    "--backend" -> List(45, 45, 98, 97, 99, 107, 101, 110, 100),
+    "typescript" -> List(116, 121, 112, 101, 115, 99, 114, 105, 112, 116),
+    "--init" -> List(45, 45, 105, 110, 105, 116),
+    "--step" -> List(45, 45, 115, 116, 101, 112),
+    "--match" -> List(45, 45, 109, 97, 116, 99, 104),
+    "--scope=é 🙂" -> List(45, 45, 115, 99, 111, 112, 101, 61, 233, 32, 128578),
+    "with spaces" -> List(119, 105, 116, 104, 32, 115, 112, 97, 99, 101, 115),
+    "" -> List(),
+  )
+
+  run simulationSerializesExactArgvTest = {
+    val largest = 9007199254740991
+    val request = {
+      ...baseRequest,
+      main: CliSpecified("--scope=é 🙂"),
+      backend: CliSpecified(TypeScriptBackend),
+      seed: CliSpecified(maxSeed),
+      config: Simulation({
+        ...defaultSimulation,
+        init: CliSpecified("with spaces"),
+        step: CliSpecified(""),
+        nTraces: CliSpecified(largest),
+        maxSteps: CliSpecified(0),
+      }),
+    }
+    match quintCommand(request, List()) {
+      | CommandReady(command) => osArgv(command, word => argumentText.get(word)) == List(
+        OsText(List(114, 117, 110)),
+        OsPath(AbsoluteTarget(modelPath)),
+        OsText(List(45, 45, 109, 98, 116)),
+        // --out-itf=trace_{seq}.itf.json
+        OsText(List(45, 45, 111, 117, 116, 45, 105, 116, 102, 61, 116, 114, 97, 99, 101, 95, 123, 115, 101, 113, 125, 46, 105, 116, 102, 46, 106, 115, 111, 110)),
+        // --seed=18446744073709551615
+        OsText(List(45, 45, 115, 101, 101, 100, 61, 49, 56, 52, 52, 54, 55, 52, 52, 48, 55, 51, 55, 48, 57, 53, 53, 49, 54, 49, 53)),
+        // --main=--scope=é 🙂
+        OsText(List(45, 45, 109, 97, 105, 110, 61, 45, 45, 115, 99, 111, 112, 101, 61, 233, 32, 128578)),
+        OsText(List(45, 45, 98, 97, 99, 107, 101, 110, 100, 61, 116, 121, 112, 101, 115, 99, 114, 105, 112, 116)),
+        // Both counts are 9007199254740991.
+        OsText(List(45, 45, 110, 45, 116, 114, 97, 99, 101, 115, 61, 57, 48, 48, 55, 49, 57, 57, 50, 53, 52, 55, 52, 48, 57, 57, 49)),
+        OsText(List(45, 45, 109, 97, 120, 45, 115, 97, 109, 112, 108, 101, 115, 61, 57, 48, 48, 55, 49, 57, 57, 50, 53, 52, 55, 52, 48, 57, 57, 49)),
+        OsText(List(45, 45, 105, 110, 105, 116, 61, 119, 105, 116, 104, 32, 115, 112, 97, 99, 101, 115)),
+        OsText(List(45, 45, 115, 116, 101, 112, 61)),
+        OsText(List(45, 45, 109, 97, 120, 45, 115, 116, 101, 112, 115, 61, 48)),
+      )
+      | _ => false
+    }
+  }
+
+  run namedTestSerializesOneExactUnicodePatternArgumentTest = {
+    val request = {
+      ...baseRequest,
+      model: RelativePath("-models/../counter = test.qnt"),
+      config: NamedTestMode({ name: List(45, 45, 61, 32, 233, 46, 128578), maxSamples: CliDefault }),
+    }
+    match quintCommand(request, List("0")) {
+      | CommandReady(command) => osArgv(command, word => argumentText.get(word)) == List(
+        OsText(List(116, 101, 115, 116)),
+        OsPath(AnchoredPath({ directory: "/caller", path: "-models/../counter = test.qnt" })),
+        OsText(List(45, 45, 111, 117, 116, 45, 105, 116, 102, 61, 116, 114, 97, 99, 101, 95, 123, 115, 101, 113, 125, 46, 105, 116, 102, 46, 106, 115, 111, 110)),
+        OsText(List(45, 45, 115, 101, 101, 100, 61, 48)),
+        // --match=^--= é\.🙂$
+        OsText(List(45, 45, 109, 97, 116, 99, 104, 61, 94, 45, 45, 61, 32, 233, 92, 46, 128578, 36)),
+      )
+      | _ => false
+    }
+  }
+
   run unsignedSeedBoundsTest = {
     val highestSeed = List(
       "1", "8", "4", "4", "6", "7", "4", "4", "0", "7", "3", "7", "0", "9", "5", "5", "1", "6", "1", "5"
