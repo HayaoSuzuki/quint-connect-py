@@ -6,6 +6,10 @@ module quint_filesystem_test {
   pure val secondTrace: FilePath = workingPath(2, trace)
   pure val firstArtifact: FilePath = evidencePath(root, 1, trace)
   pure val secondArtifact: FilePath = evidencePath(root, 2, trace)
+  pure val callerFile: FilePath = SavedFile("trace-1.itf.json")
+  pure val firstAlias: FilePath = workingPath(1, 3)
+  pure val secondAlias: FilePath = workingPath(1, 4)
+  pure val otherOwnerAlias: FilePath = workingPath(2, 3)
 
   action reserveAndGenerate(workspace: int, bytes: Bytes): bool =
     reserve(workspace, workspace, List("4", "2"), root)
@@ -105,4 +109,78 @@ module quint_filesystem_test {
       .expect(not(canReadGeneratedFile(filesystem, 1, trace)) and safety)
       .then(cleanup(1, RemoveComplete))
       .expect(filesystem.files == initialFiles.files and safety)
+
+  run savedAliasesResolveChainsTest = {
+    val alias = SavedFile("alias.itf.json")
+    val chainedAlias = SavedFile("chain.itf.json")
+    val snapshot = {
+      ...initialFiles,
+      aliases: Map(chainedAlias -> alias, alias -> callerFile),
+    }
+    all {
+      resolveFilePath(snapshot, callerFile) == ResolvedFile(callerFile),
+      resolveFilePath(snapshot, chainedAlias) == ResolvedFile(callerFile),
+      readFileBytes(snapshot, chainedAlias) == FileBytes(List(255, 0)),
+    }
+  }
+
+  run danglingAndCyclicAliasesHaveDistinctReadFailuresTest = {
+    val dangling = SavedFile("dangling.itf.json")
+    val missing = SavedFile("missing.itf.json")
+    val loopA = SavedFile("loop-a.itf.json")
+    val loopB = SavedFile("loop-b.itf.json")
+    val self = SavedFile("self.itf.json")
+    val snapshot = {
+      ...initialFiles,
+      aliases: Map(dangling -> missing, loopA -> loopB, loopB -> loopA, self -> self),
+    }
+    all {
+      readFileBytes(snapshot, missing) == FileUnavailable(MissingFile),
+      readFileBytes(snapshot, dangling) == FileUnavailable(MissingFile),
+      readFileBytes(snapshot, loopA) == FileUnavailable(AliasCycle),
+      readFileBytes(snapshot, self) == FileUnavailable(AliasCycle),
+    }
+  }
+
+  run workspaceAliasRequiresAnUnusedNameInTheOwnersWorkspaceTest =
+    init
+      .then(reserve(1, 1, List("4", "2"), root))
+      .expect(not(canCreateWorkingAlias(filesystem, 1, 2, 3)))
+      .then(createWorkspaceAlias(1, 1, 3, callerFile))
+      .expect(not(canCreateWorkingAlias(filesystem, 1, 1, 3)) and
+        not(canRecordTraceFiles(filesystem, 1, GeneratedFiles(Map(3 -> bytesOfFirstCall)))))
+      .then(generate(1, GeneratedFiles(Map(trace -> bytesOfFirstCall))))
+      .expect(not(canCreateWorkingAlias(filesystem, 1, 1, trace)) and
+        not(canReadGeneratedFile(filesystem, 1, 3)) and safety)
+
+  run completeCleanupUnlinksAliasesAndPreservesTheirTargetsTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserveAndGenerate(2, bytesOfSecondCall))
+      .then(retain(2, trace, CopyComplete))
+      .then(createWorkspaceAlias(2, 2, 3, callerFile))
+      .then(createWorkspaceAlias(1, 1, 3, secondArtifact))
+      .then(createWorkspaceAlias(1, 1, 4, otherOwnerAlias))
+      .expect(readFileBytes(filesystem, firstAlias) == FileBytes(bytesOfSecondCall) and
+        readFileBytes(filesystem, secondAlias) == FileBytes(List(255, 0)) and safety)
+      .then(cleanup(1, RemoveComplete))
+      .expect(filesystem.aliases == Map(otherOwnerAlias -> callerFile) and
+        readFileBytes(filesystem, firstAlias) == FileUnavailable(MissingFile) and
+        readFileBytes(filesystem, secondAlias) == FileUnavailable(MissingFile) and
+        readFileBytes(filesystem, secondArtifact) == FileBytes(bytesOfSecondCall) and
+        readFileBytes(filesystem, otherOwnerAlias) == FileBytes(List(255, 0)) and safety)
+
+  run interruptedCleanupKeepsOnlyNamedWorkspaceEntriesTest =
+    init
+      .then(reserveAndGenerate(1, bytesOfFirstCall))
+      .then(reserveAndGenerate(2, bytesOfSecondCall))
+      .then(retain(2, trace, CopyComplete))
+      .then(createWorkspaceAlias(1, 1, 3, secondArtifact))
+      .then(createWorkspaceAlias(1, 1, 4, callerFile))
+      .then(cleanup(1, RemoveInterrupted(Set(2, 3))))
+      .expect(filesystem.workspaces.get(1).status == WorkspacePartiallyRemoved and
+        workingEntries(filesystem, 1) == Set(2, 3) and
+        readFileBytes(filesystem, firstAlias) == FileBytes(bytesOfSecondCall) and
+        readFileBytes(filesystem, secondAlias) == FileUnavailable(MissingFile) and
+        readFileBytes(filesystem, callerFile) == FileBytes(List(255, 0)) and safety)
 }

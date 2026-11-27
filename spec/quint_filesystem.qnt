@@ -1,7 +1,7 @@
 // Logical filesystem effects of generation, evidence retention, and cleanup.
-// Root and saved-path labels denote already resolved locations. Byte lists are
-// opaque ITF contents. The model assumes exclusive ownership of fresh
-// directories and no external edits to files within the modeled lifecycle.
+// Roots and path spellings are opaque labels. File entries hold opaque ITF
+// bytes or an alias to another path. Caller entries are fixed, and a call owns
+// the entries inside its fresh workspace.
 module quint_filesystem {
   type Bytes = List[int]
   type TraceFiles = int -> Bytes
@@ -10,6 +10,10 @@ module quint_filesystem {
     | SavedFile(str)
     | WorkingFile({ workspace: int, trace: int })
     | EvidenceFile({ root: str, directory: int, trace: int })
+
+  type ResolutionFailure = MissingFile | AliasCycle
+  type FileResolution = ResolvedFile(FilePath) | UnresolvedFile(ResolutionFailure)
+  type FileRead = FileBytes(Bytes) | FileUnavailable(ResolutionFailure)
 
   type GenerationFiles = NoGeneratedFiles | GeneratedFiles(TraceFiles) | AbortedFiles(TraceFiles)
 
@@ -35,10 +39,11 @@ module quint_filesystem {
 
   type FileSystem = {
     files: FilePath -> Bytes,
+    aliases: FilePath -> FilePath,
     workspaces: int -> WorkspaceFiles,
   }
 
-  pure val emptyFileSystem: FileSystem = { files: Map(), workspaces: Map() }
+  pure val emptyFileSystem: FileSystem = { files: Map(), aliases: Map(), workspaces: Map() }
 
   pure def workingPath(workspace: int, trace: int): FilePath =
     WorkingFile({ workspace: workspace, trace: trace })
@@ -46,16 +51,40 @@ module quint_filesystem {
   pure def evidencePath(root: str, workspace: int, trace: int): FilePath =
     EvidenceFile({ root: root, directory: workspace, trace: trace })
 
-  pure def savedFiles(fs: FileSystem): FilePath -> Bytes =
-    fs.files.keys().filter(path =>
+  pure def resolveFilePath(fs: FileSystem, path: FilePath): FileResolution = {
+    val aliasPaths = fs.aliases.keys()
+    // Each fold step can follow one alias. A path still pointing at an alias
+    // after this many steps must have revisited an alias.
+    val target = aliasPaths.fold(path, (current, _) =>
+      if (aliasPaths.contains(current)) fs.aliases.get(current) else current
+    )
+    if (aliasPaths.contains(target)) UnresolvedFile(AliasCycle)
+    else if (fs.files.keys().contains(target)) ResolvedFile(target)
+    else UnresolvedFile(MissingFile)
+  }
+
+  pure def readFileBytes(fs: FileSystem, path: FilePath): FileRead =
+    match resolveFilePath(fs, path) {
+      | ResolvedFile(target) => FileBytes(fs.files.get(target))
+      | UnresolvedFile(reason) => FileUnavailable(reason)
+    }
+
+  pure def savedPaths(paths: Set[FilePath]): Set[FilePath] =
+    paths.filter(path =>
       match path {
         | SavedFile(_) => true
         | _ => false
       }
-    ).mapBy(path => fs.files.get(path))
+    )
 
-  pure def workingFiles(fs: FileSystem, workspace: int): Set[int] =
-    fs.files.keys().fold(Set(), (traces, path) =>
+  pure def savedFiles(fs: FileSystem): FilePath -> Bytes =
+    savedPaths(fs.files.keys()).mapBy(path => fs.files.get(path))
+
+  pure def savedAliases(fs: FileSystem): FilePath -> FilePath =
+    savedPaths(fs.aliases.keys()).mapBy(path => fs.aliases.get(path))
+
+  pure def workingTraces(paths: Set[FilePath], workspace: int): Set[int] =
+    paths.fold(Set(), (traces, path) =>
       match path {
         | WorkingFile(work) =>
           if (work.workspace == workspace) traces.union(Set(work.trace)) else traces
@@ -63,8 +92,24 @@ module quint_filesystem {
       }
     )
 
+  pure def workingFiles(fs: FileSystem, workspace: int): Set[int] =
+    workingTraces(fs.files.keys(), workspace)
+
+  pure def workingEntries(fs: FileSystem, workspace: int): Set[int] =
+    workingTraces(fs.files.keys().union(fs.aliases.keys()), workspace)
+
   pure def workspaceAvailable(fs: FileSystem, workspace: int): bool =
     not(fs.workspaces.keys().contains(workspace))
+
+  pure def canCreateWorkingAlias(fs: FileSystem, workspace: int, owner: int, trace: int): bool =
+    if (workspaceAvailable(fs, workspace)) false else {
+      val ws = fs.workspaces.get(workspace)
+      ws.owner == owner and ws.status == WorkspaceActive and trace >= 0 and
+        not(workingEntries(fs, workspace).contains(trace))
+    }
+
+  pure def createWorkingAlias(fs: FileSystem, workspace: int, trace: int, target: FilePath): FileSystem =
+    { ...fs, aliases: fs.aliases.put(workingPath(workspace, trace), target) }
 
   pure def canReserveFiles(fs: FileSystem, workspace: int, owner: int): bool =
     workspaceAvailable(fs, workspace) and
@@ -91,13 +136,16 @@ module quint_filesystem {
       val ws = fs.workspaces.get(workspace)
       val files = writtenFiles(output)
       ws.status == WorkspaceActive and ws.output == NoGeneratedFiles and output != NoGeneratedFiles and
-        files.keys().forall(trace => trace >= 0 and validBytes(files.get(trace)))
+        files.keys().forall(trace =>
+          trace >= 0 and validBytes(files.get(trace)) and not(fs.aliases.keys().contains(workingPath(workspace, trace)))
+        )
     }
 
   pure def recordTraceFiles(fs: FileSystem, workspace: int, output: GenerationFiles): FileSystem = {
     val emitted = writtenFiles(output)
     val ws = fs.workspaces.get(workspace)
     {
+      ...fs,
       files: emitted.keys().fold(fs.files, (files, trace) =>
         files.put(workingPath(workspace, trace), emitted.get(trace))
       ),
@@ -208,16 +256,18 @@ module quint_filesystem {
       val ws = fs.workspaces.get(workspace)
       ws.status == WorkspaceActive and ws.output != NoGeneratedFiles and
         not(canAbandonEvidence(fs, workspace)) and
-        remainingAfterCleanup(outcome).subseteq(workingFiles(fs, workspace))
+        remainingAfterCleanup(outcome).subseteq(workingEntries(fs, workspace))
     }
 
-  // Deletion may stop partway through the private workspace after an I/O error.
+  // Cleanup unlinks workspace entries by their own paths. An I/O error can
+  // leave any subset of those entries behind.
   pure def cleanupFiles(fs: FileSystem, workspace: int, outcome: CleanupOutcome): FileSystem = {
     val ws = fs.workspaces.get(workspace)
-    val remove = workingFiles(fs, workspace).exclude(remainingAfterCleanup(outcome))
+    val remove = workingEntries(fs, workspace).exclude(remainingAfterCleanup(outcome))
+      .map(trace => workingPath(workspace, trace))
     {
-      files: fs.files.keys().exclude(remove.map(trace => workingPath(workspace, trace)))
-        .mapBy(path => fs.files.get(path)),
+      files: fs.files.keys().exclude(remove).mapBy(path => fs.files.get(path)),
+      aliases: fs.aliases.keys().exclude(remove).mapBy(path => fs.aliases.get(path)),
       workspaces: fs.workspaces.put(workspace, {
         ...ws,
         status: if (outcome == RemoveComplete) WorkspaceRemoved else WorkspacePartiallyRemoved,
@@ -269,9 +319,21 @@ module quint_filesystem {
       | SavedFile(_) => true
     }
 
+  pure def aliasEntryIsValid(fs: FileSystem, path: FilePath): bool =
+    match path {
+      | SavedFile(_) => true
+      | EvidenceFile(_) => false
+      | WorkingFile(work) =>
+        if (workspaceAvailable(fs, work.workspace)) false else
+          work.trace >= 0 and fs.workspaces.get(work.workspace).status != WorkspaceRemoved
+    }
+
   pure def fileSystemSafety(fs: FileSystem, initial: FileSystem): bool =
     and {
       savedFiles(fs) == savedFiles(initial),
+      savedAliases(fs) == savedAliases(initial),
+      fs.files.keys().intersect(fs.aliases.keys()).size() == 0,
+      fs.aliases.keys().forall(path => aliasEntryIsValid(fs, path)),
       fs.files.keys().forall(path => fileWorkspaceExists(fs, path)),
       fs.workspaces.keys().forall(workspace =>
         workingFilesMatchOutput(fs, workspace) and evidenceMatchesOutput(fs, workspace)
@@ -309,6 +371,11 @@ module quint_filesystem_sample {
     filesystem' = recordTraceFiles(filesystem, workspace, output),
   }
 
+  action createWorkspaceAlias(workspace: int, owner: int, trace: int, target: FilePath): bool = all {
+    canCreateWorkingAlias(filesystem, workspace, owner, trace),
+    filesystem' = createWorkingAlias(filesystem, workspace, trace, target),
+  }
+
   action stage(workspace: int, trace: int): bool = all {
     canStageEvidence(filesystem, workspace, trace),
     filesystem' = stageEvidence(filesystem, workspace, trace),
@@ -344,11 +411,13 @@ module quint_filesystem_sample {
   action step: bool = {
     nondet workspace = Set(1, 2).oneOf()
     nondet count = 0.to(4).oneOf()
+    val otherWorkspace = if (workspace == 1) 2 else 1
     val bytes = if (workspace == 1) bytesOfFirstCall else bytesOfSecondCall
     any {
       reserve(workspace, workspace, List("4", "2"), root),
       generate(workspace, GeneratedFiles(Map(trace -> bytes, 2 -> List(0, 255)))),
       generate(workspace, AbortedFiles(Map(trace -> bytes.slice(0, 1)))),
+      createWorkspaceAlias(workspace, workspace, 3, evidencePath(root, otherWorkspace, trace)),
       stage(workspace, trace),
       writeCopy(workspace, count),
       publish(workspace),
@@ -357,6 +426,7 @@ module quint_filesystem_sample {
       retain(workspace, trace, CopyInterrupted(count)),
       cleanup(workspace, RemoveComplete),
       cleanup(workspace, RemoveInterrupted(Set(trace))),
+      cleanup(workspace, RemoveInterrupted(Set(3))),
     }
   }
 }
