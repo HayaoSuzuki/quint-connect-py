@@ -259,6 +259,7 @@ module quint_connect {
 
   var calls: CallId -> CallState
   var filesystem: fs::FileSystem
+  var lastStepReducedWork: bool
 
   pure def recordEvent(s: CallState, phase: Phase, event: Event): CallState =
     { ...s, phase: phase, history: s.history.append(event) }
@@ -487,11 +488,16 @@ module quint_connect {
   action init: bool = all {
     calls' = CALL_IDS.mapBy(_ => { phase: Ready, history: List(), selection: defaultSelection }),
     filesystem' = initialFilesystem,
+    lastStepReducedWork' = true,
   }
 
-  action changeCallWithFiles(id: CallId, updated: CallState, snapshot: fs::FileSystem): bool = all {
-    calls' = calls.set(id, updated),
-    filesystem' = snapshot,
+  action changeCallWithFiles(id: CallId, updated: CallState, snapshot: fs::FileSystem): bool = {
+    val nextCalls = calls.set(id, updated)
+    all {
+      calls' = nextCalls,
+      filesystem' = snapshot,
+      lastStepReducedWork' = workLess(totalWork(nextCalls, snapshot), totalWork(calls, filesystem)),
+    }
   }
 
   action changeCall(id: CallId, updated: CallState): bool =
@@ -503,6 +509,7 @@ module quint_connect {
     false,
     calls' = calls,
     filesystem' = filesystem,
+    lastStepReducedWork' = lastStepReducedWork,
   }
 
   action startReplayWithSelection(id: CallId, traces: List[TraceId], selection: itf::Selection): bool = all {
@@ -1493,6 +1500,84 @@ module quint_connect {
         evidenceFollowsSave(calls.get(filesystem.workspaces.get(workspace).owner).history, workspace)
     )
 
+  pure val noWork: List[int] = List(0, 0, 0, 0, 0)
+
+  pure def pendingTraces(batch: TraceBatch): int = batch.traces.length() - batch.traceIndex
+
+  pure def activeWork(active: ActiveTrace, beforeObservation: int): List[int] =
+    List(4, pendingTraces(active.validated.batch), 1,
+      active.validated.steps.length() - active.stepIndex, beforeObservation)
+
+  // In lexicographic order an outer phase can introduce a finite amount of
+  // work at a lower position, such as the number of steps in a new trace.
+  pure def callWork(state: CallState, snapshot: fs::FileSystem): List[int] =
+    match state.phase {
+      | Ready => List(7, 0, 0, 0, 0)
+      | AwaitingGeneration(_) => List(6, 0, 0, 0, 0)
+      | AwaitingListing(_) => List(5, 0, 0, 0, 0)
+      | AwaitingValidation(batch) => List(4, pendingTraces(batch), 3, 0, 0)
+      | AwaitingDriver(validated) => List(4, pendingTraces(validated.batch), 2, 0, 0)
+      | AwaitingOperation(active) => activeWork(active, 1)
+      | AwaitingObservation(active) => activeWork(active, 0)
+      | AwaitingArtifact(ctx) => {
+        val workspace = ctx.generation.workspace
+        match snapshot.workspaces.get(workspace).evidence {
+          | StagedEvidence(staged) => {
+            val bytes = snapshot.files.get(fs::workingPath(workspace, staged.trace))
+            List(3, 0, bytes.length() - staged.bytes.length(), 0, 0)
+          }
+          | _ => List(3, 1, 0, 0, 0)
+        }
+      }
+      | AwaitingCleanup(_) => List(2, 0, 0, 0, 0)
+      | Finished(_) => noWork
+    }
+
+  pure def totalWork(states: CallId -> CallState, snapshot: fs::FileSystem): List[int] =
+    states.keys().fold(noWork, (total, id) => {
+      val rank = callWork(states.get(id), snapshot)
+      range(0, total.length()).foldl(List(), (sum, i) => sum.append(total.nth(i) + rank.nth(i)))
+    })
+
+  pure def workLess(left: List[int], right: List[int]): bool =
+    range(0, left.length()).foldl(0, (order, i) =>
+      if (order == 0) left.nth(i) - right.nth(i) else order
+    ) < 0
+
+  // For each unfinished phase, this checks the guard of a response that can
+  // advance it. Driver callbacks may fail even when every driver ID is in use.
+  def hasNextResponse(id: CallId): bool =
+    match calls.get(id).phase {
+      | Ready => true // The caller can submit a replay.
+      | AwaitingGeneration(g) =>
+        fs::canRecordTraceFiles(filesystem, g.workspace, fs::AbortedFiles(Map()))
+      | AwaitingListing(_) => true // The listing may succeed or fail.
+      | AwaitingValidation(batch) =>
+        match batch.source {
+          | SavedPaths(_) => true // A requested path can be read or report an error.
+          | _ => traceIsReadable(batch)
+        }
+      | AwaitingDriver(_) => true
+      | AwaitingOperation(_) => true
+      | AwaitingObservation(_) => true
+      | AwaitingArtifact(ctx) =>
+        fs::canStageEvidence(filesystem, ctx.generation.workspace, ctx.detail.position.trace.trace) or
+          fs::canAbandonEvidence(filesystem, ctx.generation.workspace)
+      | AwaitingCleanup(ctx) =>
+        fs::canCleanupFiles(filesystem, ctx.generation.workspace, fs::RemoveComplete)
+      | Finished(_) => false
+    }
+
+  val processingProgress: bool = and {
+    lastStepReducedWork,
+    pendingCalls.forall(hasNextResponse),
+    CALL_IDS.forall(id => {
+      val rank = callWork(calls.get(id), filesystem)
+      rank.indices().forall(i => rank.nth(i) >= 0)
+    }),
+    (totalWork(calls, filesystem) == noWork) == (pendingCalls.size() == 0),
+  }
+
   val safety: bool = and {
     replayInOrder,
     firstFailureStopsReplay,
@@ -1501,6 +1586,7 @@ module quint_connect {
     isolatedResources,
     fs::fileSystemSafety(filesystem, initialFilesystem),
     persistedEvidence,
+    processingProgress,
   }
 
   pure val incrementStep: TraceStep =
@@ -1532,9 +1618,15 @@ module quint_connect {
       maxSamples: cli::CliDefault, maxSteps: cli::CliDefault,
     })
 
-  action validateSampledSavedTrace(id: CallId, result: ValidationResult): bool =
+  action validateSampledAbstractTrace(id: CallId, result: ValidationResult): bool =
     match calls.get(id).phase {
-      | AwaitingValidation(batch) => all { batch.source == SavedItf, validateTrace(id, result) }
+      | AwaitingValidation(batch) =>
+        match batch.source {
+          | SavedItf => validateTrace(id, result)
+          | GeneratedItf(_) =>
+            all { batch.basenames.keys().size() == 0, validateTrace(id, result) }
+          | SavedPaths(_) => inapplicable
+        }
       | _ => inapplicable
     }
 
@@ -1598,8 +1690,10 @@ module quint_connect {
     pendingCalls.size() > 0,
     {
       nondet id = pendingCalls.oneOf()
-      nondet workspace = WORKSPACE_IDS.oneOf()
-      nondet driver = DRIVER_IDS.oneOf()
+      // A missing ID cannot pass allocation guards. The fallback still lets
+      // this call advance through replay and error responses.
+      nondet workspace = (if (WORKSPACE_IDS.size() == 0) Set(0) else WORKSPACE_IDS).oneOf()
+      nondet driver = (if (DRIVER_IDS.size() == 0) Set(0) else DRIVER_IDS).oneOf()
       nondet observed = Set(integerDigit(0), integerDigit(1), booleanValue(true), textValue(List(102, 105, 120, 116, 117, 114, 101)), itemSet).oneOf()
       nondet producedBytes = GENERATED_INPUTS.union(Set(List(123))).oneOf()
       any {
@@ -1640,10 +1734,10 @@ module quint_connect {
         listGeneratedOutput(id, ListingFailed("output listing failed")),
         readGeneratedInput(id, ReadSucceeded),
         readGeneratedInput(id, ReadFailed("output file unreadable")),
-        validateSampledSavedTrace(id, ValidSteps(List(openingStep))),
-        validateSampledSavedTrace(id, ValidSteps(List(openingStep, incrementStep))),
-        validateSampledSavedTrace(id, EmptyStates),
-        validateSampledSavedTrace(id, InvalidItf({ location: InvalidStep(1), cause: "invalid later operation" })),
+        validateSampledAbstractTrace(id, ValidSteps(List(openingStep))),
+        validateSampledAbstractTrace(id, ValidSteps(List(openingStep, incrementStep))),
+        validateSampledAbstractTrace(id, EmptyStates),
+        validateSampledAbstractTrace(id, InvalidItf({ location: InvalidStep(1), cause: "invalid later operation" })),
         createDriver(id, FactorySucceeded(driver)),
         createDriver(id, FactoryFailed("factory failed")),
         applyOperation(id, OperationApplied),
