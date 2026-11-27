@@ -62,9 +62,12 @@ module quint_connect {
     stepIndex: int,
   }
 
+  type TraceBasenames = TraceId -> List[str]
+
   type TraceBatch = {
     source: Source,
     traces: List[TraceId],
+    basenames: TraceBasenames,
     traceIndex: int,
   }
 
@@ -85,11 +88,12 @@ module quint_connect {
   type ListingResult = ListingSucceeded | ListingFailed(str)
 
   type SavedTracePosition = { path: fs::FilePath, position: TracePosition }
+  type GeneratedTracePosition = { path: fs::FilePath, basename: List[str], position: TracePosition }
 
   type Location =
     | AtTrace(TracePosition)
     | AtStep(StepPosition)
-    | AtGeneratedTrace({ path: fs::FilePath, position: TracePosition })
+    | AtGeneratedTrace(GeneratedTracePosition)
     | AtSavedTrace(SavedTracePosition)
     | AtSavedStep({ path: fs::FilePath, position: StepPosition })
 
@@ -207,11 +211,11 @@ module quint_connect {
     | ReplayRequested(List[TraceId])
     | ReplayFilesRequested(List[fs::FilePath])
     | SavedReadAttempted(SavedTracePosition)
-    | GeneratedReadAttempted({ path: fs::FilePath, position: TracePosition })
+    | GeneratedReadAttempted(GeneratedTracePosition)
     | CommandPrepared({ request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand })
     | WorkspaceReserved(Generation)
     | ProcessExitedSuccessfully(Generation)
-    | GenerationCompleted({ generation: Generation, result: GenerationResult })
+    | GenerationCompleted({ generation: Generation, result: GenerationResult, basenames: TraceBasenames })
     | ValidationAttempted(TracePosition)
     | TraceValidated({ position: TracePosition, steps: List[TraceStep] })
     | FactoryCalled(TracePosition)
@@ -263,7 +267,7 @@ module quint_connect {
     if (traces.length() == 0)
       stop(recorded, source, EmptyTrace(NoInputPaths))
     else
-      { ...recorded, phase: AwaitingValidation({ source: source, traces: traces, traceIndex: 0 }) }
+      { ...recorded, phase: AwaitingValidation({ source: source, traces: traces, basenames: Map(), traceIndex: 0 }) }
   }
 
   pure def finish(s: CallState, source: Source, result: Outcome): CallState =
@@ -289,8 +293,8 @@ module quint_connect {
       | NamedTestOutput => produced > 0
     }
 
-  pure def onGeneration(s: CallState, g: Generation, result: GenerationResult): CallState = {
-    val recorded = recordEvent(s, s.phase, GenerationCompleted({ generation: g, result: result }))
+  pure def onGeneration(s: CallState, g: Generation, result: GenerationResult, basenames: TraceBasenames): CallState = {
+    val recorded = recordEvent(s, s.phase, GenerationCompleted({ generation: g, result: result, basenames: basenames }))
     val source = GeneratedItf(g)
     match result {
       | ProcessFailed(cause) => stop(recorded, source, QuintFailed({ seed: g.seed, cause: cause }))
@@ -304,13 +308,13 @@ module quint_connect {
           match g.expectation {
             | SimulationCount(requested) =>
               if (hasEnoughTraces(g.expectation, traces.length()))
-                { ...recorded, phase: AwaitingValidation({ source: source, traces: traces, traceIndex: 0 }) }
+                { ...recorded, phase: AwaitingValidation({ source: source, traces: traces, basenames: basenames, traceIndex: 0 }) }
               else
                 stop(recorded, source, IncompleteGeneration({
                   seed: g.seed, requested: requested, produced: traces.length(),
                 }))
             | NamedTestOutput =>
-              { ...recorded, phase: AwaitingValidation({ source: source, traces: traces, traceIndex: 0 }) }
+              { ...recorded, phase: AwaitingValidation({ source: source, traces: traces, basenames: basenames, traceIndex: 0 }) }
           }
     }
   }
@@ -601,7 +605,7 @@ module quint_connect {
               | ProcessSucceeded(_) => recordEvent(current, current.phase, ProcessExitedSuccessfully(g))
               | _ => current
             }
-            changeCallWithFiles(id, onGeneration(exited, g, result), fs::recordTraceFiles(filesystem, g.workspace, output))
+            changeCallWithFiles(id, onGeneration(exited, g, result, Map()), fs::recordTraceFiles(filesystem, g.workspace, output))
           },
         }
       | _ => inapplicable
@@ -641,11 +645,14 @@ module quint_connect {
   action listGeneratedOutput(id: CallId, result: ListingResult): bool =
     match calls.get(id).phase {
       | AwaitingListing(listing) => {
-        val outcome = match result {
-          | ListingSucceeded => ProcessSucceeded(cli::orderedGeneratedTraces(listing.entries))
-          | ListingFailed(cause) => OutputUnavailable(cause)
+        val output = match result {
+          | ListingSucceeded => {
+              result: ProcessSucceeded(cli::orderedGeneratedTraces(listing.entries)),
+              basenames: listing.entries.foldl(Map(), (names, entry) => names.put(entry.trace, entry.name)),
+            }
+          | ListingFailed(cause) => { result: OutputUnavailable(cause), basenames: Map() }
         }
-        changeCall(id, onGeneration(calls.get(id), listing.generation, outcome))
+        changeCall(id, onGeneration(calls.get(id), listing.generation, output.result, output.basenames))
       }
       | _ => inapplicable
     }
@@ -1025,7 +1032,10 @@ module quint_connect {
         traceIsNext(history, index, file.position) and hasPrior(history, index, event =>
           match event {
             | GenerationCompleted(completed) =>
-              file.path == fs::workingPath(completed.generation.workspace, file.position.trace)
+              if (completed.basenames.keys().contains(file.position.trace))
+                file.path == fs::workingPath(completed.generation.workspace, file.position.trace) and
+                  file.basename == completed.basenames.get(file.position.trace)
+              else false
             | _ => false
           }
         )
@@ -1429,18 +1439,21 @@ module quint_connect {
           | GeneratedItf(g) => {
             val position = tracePosition(batch)
             val path = fs::workingPath(g.workspace, position.trace)
-            val current = calls.get(id)
-            val recorded = recordEvent(current, current.phase, GeneratedReadAttempted({ path: path, position: position }))
-            all {
-              fs::canReadGeneratedFile(filesystem, g.workspace, position.trace),
-              match result {
-                | ReadSucceeded => changeCall(id, onValidation(recorded, batch,
-                    validationForBytes(filesystem.files.get(path), current.selection)))
-                | ReadFailed(cause) => changeCall(id, stop(recorded, batch.source, TraceFailed({
-                    location: AtGeneratedTrace({ path: path, position: position }), cause: cause,
-                  })))
-              },
-            }
+            if (batch.basenames.keys().contains(position.trace)) {
+              val file = { path: path, basename: batch.basenames.get(position.trace), position: position }
+              val current = calls.get(id)
+              val recorded = recordEvent(current, current.phase, GeneratedReadAttempted(file))
+              all {
+                fs::canReadGeneratedFile(filesystem, g.workspace, position.trace),
+                match result {
+                  | ReadSucceeded => changeCall(id, onValidation(recorded, batch,
+                      validationForBytes(filesystem.files.get(path), current.selection)))
+                  | ReadFailed(cause) => changeCall(id, stop(recorded, batch.source, TraceFailed({
+                      location: AtGeneratedTrace(file), cause: cause,
+                    })))
+                },
+              }
+            } else inapplicable
           }
           | _ => inapplicable
         }
