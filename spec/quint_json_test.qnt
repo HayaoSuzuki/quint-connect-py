@@ -139,7 +139,7 @@ module quint_json_test {
     ).forall(bytes => parseJson(bytes) == InvalidJsonSyntax))
 
   run nestedContainersHaveNoFixedDepthTest = {
-    val depth = 70
+    val depth = 150
     val opens = range(0, depth).foldl(List(), (bytes, _) => bytes.append(91))
     val closes = range(0, depth).foldl(List(), (bytes, _) => bytes.append(93))
     val expected = range(0, depth).foldl(List(JsonNumber), (nodes, id) => nodes.append(JsonArray(List(id))))

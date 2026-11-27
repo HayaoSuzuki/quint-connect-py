@@ -228,6 +228,8 @@ module quint_itf_test {
   pure val byteTestLabels: TextLabels = Map(
     List(118, 97, 114, 115) -> "vars",
     List(115, 116, 97, 116, 101, 115) -> "states",
+    List(35, 109, 101, 116, 97) -> "#meta",
+    List(105, 110, 100, 101, 120) -> "index",
     List(105, 116, 101, 109, 115) -> "items",
     List(35, 116, 117, 112) -> "#tup",
     List(128578) -> "🙂",
@@ -305,6 +307,19 @@ module quint_itf_test {
         InvalidTrace(AtState({ index: 0, problem: InvalidExpectedValue }))
       | _ => false
     })
+
+  run largeJsonNumberInUnselectedMetadataIsAcceptedTest = {
+    // Add "#meta":{"index":1e100000000000000000000} to the state.
+    val metadata = List(
+      44, 34, 35, 109, 101, 116, 97, 34, 58, 123, 34, 105, 110, 100, 101, 120, 34,
+      58, 49, 101, 49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+      48, 48, 48, 48, 48, 48, 48, 125,
+    )
+    val stateEnd = rawUnicodeItf.length() - 3
+    val withMetadata = rawUnicodeItf.slice(0, stateEnd).concat(metadata)
+      .concat(rawUnicodeItf.slice(stateEnd, rawUnicodeItf.length()))
+    assert(bytesDecodeToSameTuple(withMetadata))
+  }
 
   run invalidUtf8AndJsonSyntaxAreDistinguishedTest =
     assert(and {
