@@ -1,18 +1,26 @@
 module quint_values {
   type NodeId = int
+  // Decoded Unicode scalar values, in order.
+  type Text = List[int]
   type Decimal = { negative: bool, digits: List[int] }
   type ValueNode =
     | BooleanNode(bool)
     | IntegerNode(Decimal)
-    | TextNode(str)
+    | TextNode(Text)
     | ListNode(List[NodeId])
     | TupleNode(List[NodeId])
-    | RecordNode(str -> NodeId)
+    | RecordNode(Text -> NodeId)
     | SetNode(List[NodeId])
     | MapNode(List[(NodeId, NodeId)])
     | UnusableNode
 
   type ItfValue = { nodes: List[ValueNode], root: NodeId }
+
+  pure def validText(text: Text): bool =
+    text.indices().forall(i => {
+      val point = text.nth(i)
+      0 <= point and point <= 0x10FFFF and (point < 0xD800 or point > 0xDFFF)
+    })
 
   pure def validDecimal(number: Decimal): bool =
     number.digits.length() > 0 and
@@ -33,10 +41,10 @@ module quint_values {
   type CanonicalNode =
     | CanonicalBoolean(bool)
     | CanonicalInteger(Decimal)
-    | CanonicalText(str)
+    | CanonicalText(Text)
     | CanonicalList(List[NodeId])
     | CanonicalTuple(List[NodeId])
-    | CanonicalRecord(str -> NodeId)
+    | CanonicalRecord(Text -> NodeId)
     | CanonicalSet(Set[NodeId])
     | CanonicalMap(NodeId -> NodeId)
     | CanonicalUnusable
@@ -65,7 +73,7 @@ module quint_values {
       | IntegerNode(number) =>
           if (validDecimal(number)) CanonicalInteger(normalizeDecimal(number))
           else CanonicalUnusable
-      | TextNode(value) => CanonicalText(value)
+      | TextNode(value) => if (validText(value)) CanonicalText(value) else CanonicalUnusable
       | ListNode(children) => {
           val ids = remapChildren(nodeIds, children)
           if (allChildrenUsable(ids)) CanonicalList(ids) else CanonicalUnusable
@@ -76,7 +84,7 @@ module quint_values {
         }
       | RecordNode(recordFields) => {
           val ids = recordFields.keys().mapBy(key => childId(nodeIds, recordFields.get(key)))
-          if (ids.keys().forall(key => ids.get(key) != invalidNodeId)) CanonicalRecord(ids)
+          if (ids.keys().forall(key => validText(key) and ids.get(key) != invalidNodeId)) CanonicalRecord(ids)
           else CanonicalUnusable
         }
       | SetNode(elements) => {

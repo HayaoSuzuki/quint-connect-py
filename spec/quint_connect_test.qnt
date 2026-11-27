@@ -4,7 +4,7 @@ module quint_connect_test {
   import quint_itf as itf from "./quint_itf"
   import quint_values as qv from "./quint_values"
   import quint_connect_documents.* from "./quint_connect"
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), JSON_LABELS = jsonLabels, GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map()).* from "./quint_connect"
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map()).* from "./quint_connect"
 
   pure val simulation: Generation =
     { expectation: SimulationCount(1), seed: sampleSeed, workspace: 1, artifactRoot: defaultArtifactRoot }
@@ -292,7 +292,7 @@ module quint_connect_test {
   )
 
   pure val compoundStep: TraceStep = {
-    operation: { name: "init", arguments: Map() },
+    operation: { name: initName, arguments: Map() },
     expected: { nodes: itf::valueNodes(compoundDocument), root: 6 },
   }
 
@@ -381,7 +381,7 @@ module quint_connect_test {
       .expect(finishedAs(1, failed(InvalidRequest(RejectedActionPath))) and filesystem.workspaces.keys().size() == 0)
       .then(startRequestedRun(2, { ...sampleRequest,
         config: cli::NamedTestMode({ name: List(97), maxSamples: cli::CliDefault }),
-      }, sampleSeed, "evidence", { actionPath: List("dispatch"), statePath: List("items") }))
+      }, sampleSeed, "evidence", { actionPath: List(List(100, 105, 115, 112, 97, 116, 99, 104)), statePath: List(List(105, 116, 101, 109, 115)) }))
       .then(completeProcessSuccess(2, List({ name: cli::generatedFilename(List("0")), trace: 0, bytes: namedBytes })))
       .then(listGeneratedOutput(2, ListingSucceeded))
       .then(validateGeneratedDocument(2, namedBytes))

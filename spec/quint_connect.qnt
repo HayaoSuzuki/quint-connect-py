@@ -25,12 +25,12 @@ module quint_connect {
   pure def booleanValue(value: bool): Value =
     { nodes: List(qv::BooleanNode(value)), root: 0 }
 
-  pure def textValue(value: str): Value =
+  pure def textValue(value: qv::Text): Value =
     { nodes: List(qv::TextNode(value)), root: 0 }
 
   type Operation = {
-    name: str,
-    arguments: str -> Value,
+    name: qv::Text,
+    arguments: qv::Text -> Value,
   }
 
   type TraceStep = {
@@ -234,7 +234,6 @@ module quint_connect {
   const CALL_IDS: Set[CallId]
   const WORKSPACE_IDS: Set[WorkspaceId]
   const DRIVER_IDS: Set[DriverId]
-  const JSON_LABELS: itf::TextLabels
   const GENERATED_INPUTS: Set[fs::Bytes]
   const SAVED_INPUTS: str -> fs::Bytes
 
@@ -683,11 +682,10 @@ module quint_connect {
     validateTrace(id, fromDecodedTrace(itf::decodeItf(document, calls.get(id).selection)))
 
   pure def validationForBytes(bytes: fs::Bytes, selection: itf::Selection): ValidationResult =
-    match itf::parseItfBytes(bytes, JSON_LABELS) {
+    match itf::parseItfBytes(bytes) {
       | ByteInputParsed(document) => fromDecodedTrace(itf::decodeItf(document, selection))
       | ByteInputInvalidUtf8 => InvalidItf({ location: InvalidFile, cause: "invalid UTF-8" })
       | ByteInputInvalidJson => InvalidItf({ location: InvalidFile, cause: "invalid JSON" })
-      | ByteInputUnlabeledText => InvalidItf({ location: InvalidFile, cause: "unlabeled JSON text in model input" })
     }
 
   pure def validateSavedFile(snapshot: fs::FileSystem, path: fs::FilePath, result: ReadResult, selection: itf::Selection): ValidationResult = {
@@ -870,8 +868,10 @@ module quint_connect {
       id, result, if (result == StorageSucceeded) fs::RemoveComplete else fs::RemoveInterrupted(Set())
     )
 
+  pure val initName: qv::Text = List(105, 110, 105, 116) // init
+
   pure val openingStep: TraceStep =
-    { operation: { name: "init", arguments: Map() }, expected: integerDigit(0) }
+    { operation: { name: initName, arguments: Map() }, expected: integerDigit(0) }
 
   pure def hasEvent(history: List[Event], predicate: (Event) => bool): bool =
     history.indices().exists(index => predicate(history.nth(index)))
@@ -1388,7 +1388,10 @@ module quint_connect {
   }
 
   pure val incrementStep: TraceStep =
-    { operation: { name: "increment", arguments: Map("amount" -> integerDigit(1)) }, expected: integerDigit(1) }
+    { operation: {
+        name: List(105, 110, 99, 114, 101, 109, 101, 110, 116), // increment
+        arguments: Map(List(97, 109, 111, 117, 110, 116) -> integerDigit(1)), // amount
+      }, expected: integerDigit(1) }
 
   pure def hasFinished(phase: Phase): bool =
     match phase {
@@ -1478,26 +1481,26 @@ module quint_connect {
       nondet id = pendingCalls.oneOf()
       nondet workspace = WORKSPACE_IDS.oneOf()
       nondet driver = DRIVER_IDS.oneOf()
-      nondet observed = Set(integerDigit(0), integerDigit(1), booleanValue(true), textValue("fixture"), itemSet).oneOf()
+      nondet observed = Set(integerDigit(0), integerDigit(1), booleanValue(true), textValue(List(102, 105, 120, 116, 117, 114, 101)), itemSet).oneOf()
       nondet producedBytes = GENERATED_INPUTS.union(Set(List(123))).oneOf()
       any {
         startReplay(id, List()),
         startReplay(id, List(0, 1)),
         startReplay(id, List(0, 0)),
-        startReplayPaths(id, List(fs::SavedFile("good.itf.json")), { ...defaultSelection, statePath: List("items") }),
+        startReplayPaths(id, List(fs::SavedFile("good.itf.json")), { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         startReplayPaths(id, List(fs::SavedFile("good.itf.json"), fs::SavedFile("bad.itf.json")),
-          { ...defaultSelection, statePath: List("items") }),
+          { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         startReplayPaths(id, List(fs::SavedFile("good.itf.json"), fs::SavedFile("missing.itf.json")),
-          { ...defaultSelection, statePath: List("items") }),
-        startSampledEvidenceReplay(id, workspace, { ...defaultSelection, statePath: List("items") }),
+          { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
+        startSampledEvidenceReplay(id, workspace, { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         readSavedPath(id, ReadSucceeded),
         readSavedPath(id, ReadFailed("permission denied")),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(1)),
-          sampleSeed, defaultArtifactRoot, { ...defaultSelection, statePath: List("items") }),
+          sampleSeed, defaultArtifactRoot, { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(2)),
-          sampleSeed, defaultArtifactRoot, { ...defaultSelection, statePath: List("items") }),
+          sampleSeed, defaultArtifactRoot, { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         startRequestedRun(id, simulatorRequest(workspace, cli::NamedTestMode({ name: List(97), maxSamples: cli::CliDefault })),
-          sampleSeed, defaultArtifactRoot, { actionPath: List("dispatch"), statePath: List("items") }),
+          sampleSeed, defaultArtifactRoot, { actionPath: List(List(100, 105, 115, 112, 97, 116, 99, 104)), statePath: List(List(105, 116, 101, 109, 115)) }),
         failReservation(id, sampleSeed, "temporary directory unavailable"),
         completeProcessSuccess(id, List()),
         completeProcessSuccess(id,
@@ -1553,22 +1556,22 @@ module quint_connect_documents {
   pure val compoundDocument: itf::ItfDocument = {
     root: 11,
     nodes: List(
-      itf::RawText({ spelling: "items", codePoints: List(105, 116, 101, 109, 115) }),
+      itf::RawText(List(105, 116, 101, 109, 115)),
       itf::RawArray(List(0)),
-      itf::RawText({ spelling: "1", codePoints: List(49) }),
-      itf::RawObject(List(("#bigint", 2))),
+      itf::RawText(List(49)),
+      itf::RawObject(List((itf::bigintKey, 2))),
       itf::RawBoolean(true),
       itf::RawArray(List(3, 4)),
-      itf::RawObject(List(("#set", 5))),
-      itf::RawText({ spelling: "init", codePoints: List(105, 110, 105, 116) }),
+      itf::RawObject(List((itf::setKey, 5))),
+      itf::RawText(List(105, 110, 105, 116)),
       itf::RawObject(List()),
-      itf::RawObject(List(("items", 6), ("mbt::actionTaken", 7), ("mbt::nondetPicks", 8))),
+      itf::RawObject(List((List(105, 116, 101, 109, 115), 6), (itf::mbtAction, 7), (itf::mbtPicks, 8))),
       itf::RawArray(List(9)),
-      itf::RawObject(List(("vars", 1), ("states", 10))),
+      itf::RawObject(List((itf::varsKey, 1), (itf::statesKey, 10))),
     ),
   }
 
-  pure val itemsSelection: itf::Selection = { actionPath: List(), statePath: List("items") }
+  pure val itemsSelection: itf::Selection = { actionPath: List(), statePath: List(List(105, 116, 101, 109, 115)) }
 
   pure val namedBytes: fs::Bytes = List(
     123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34,
@@ -1591,26 +1594,11 @@ module quint_connect_documents {
 
   pure val generatedInputs: Set[fs::Bytes] = Set(originalBytes, otherBytes, namedBytes)
 
-  pure val jsonLabels: itf::TextLabels = Map(
-    List(118, 97, 114, 115) -> "vars",
-    List(115, 116, 97, 116, 101, 115) -> "states",
-    List(105, 116, 101, 109, 115) -> "items",
-    List(35, 115, 101, 116) -> "#set",
-    List(35, 98, 105, 103, 105, 110, 116) -> "#bigint",
-    List(49) -> "1",
-    List(109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107, 101, 110) -> "mbt::actionTaken",
-    List(109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115) -> "mbt::nondetPicks",
-    List(105, 110, 105, 116) -> "init",
-    List(100, 105, 115, 112, 97, 116, 99, 104) -> "dispatch",
-    List(116, 97, 103) -> "tag",
-    List(118, 97, 108, 117, 101) -> "value",
-    List(35, 116, 117, 112) -> "#tup",
-  )
 }
 
 module quint_connect_sample {
   import quint_connect_documents.*
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), JSON_LABELS = jsonLabels, GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs).*
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs).*
 
   observation replayStarted = anyCallHas(event =>
     match event {

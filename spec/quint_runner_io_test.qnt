@@ -4,7 +4,7 @@ module quint_runner_io_test {
   import quint_itf as itf from "./quint_itf"
   import quint_connect_documents.* from "./quint_connect"
   import quint_connect(CALL_IDS = Set(1, 2, 3), WORKSPACE_IDS = Set(1), DRIVER_IDS = Set(1, 2),
-    JSON_LABELS = jsonLabels, GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map()).* from "./quint_connect"
+    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map()).* from "./quint_connect"
 
   pure val firstTrace: TracePosition = { trace: 2, traceIndex: 0 }
   pure val secondTrace: TracePosition = { trace: 10, traceIndex: 1 }
@@ -24,7 +24,7 @@ module quint_runner_io_test {
   pure val detail: Mismatch = {
     position: { trace: firstTrace, stepIndex: 0 },
     step: {
-      operation: { name: "init", arguments: Map() },
+      operation: { name: initName, arguments: Map() },
       expected: { nodes: itf::valueNodes(compoundDocument), root: 6 },
     },
     actual: integerDigit(1),
