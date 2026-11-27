@@ -41,6 +41,7 @@ quint run spec/quint_connect.qnt --main=quint_connect_sample --invariant=safety 
 **ファイル** `Cargo.toml`、`Cargo.lock`、`pyproject.toml`、`.gitignore`、`src/lib.rs`、`src/python/mod.rs`、`python/quint_connect/__init__.py`、`tests/test_package.py`。
 
 - [ ] `test_import_without_quint` で `import quint_connect` と `import quint_connect._native` に成功し、import 時に Quint のプロセスが起動しないことを確認する。テストの subprocess に Quint と Node.js を含まない検索パスを渡す。
+- [ ] Python パッケージのメタデータにも `Apache-2.0` を指定し、sdist と wheel にルートの `LICENSE` を含める。
 - [ ] PyO3 0.30 系の `abi3-py314` で拡張を構成する。単一の Rust クレートに `python` 機能を設け、Maturin の `bindings = "pyo3"`、`python-source = "python"`、`module-name = "quint_connect._native"`、`features = ["python"]` で拡張をビルドする。Cargo の既定では Rust の処理本体を Python と独立にテストできるようにする。pytest、Hypothesis、pytest-xdist は `test` 依存グループに置く。Rust の `target/` とビルドで生成する Python 拡張を成果物として扱う。
 - [ ] `cargo test --no-default-features` と `uv run --python 3.14 --group test pytest -q tests/test_package.py` を実行する。Quint の初期状態の `safety` を `--max-steps=0` で検査する。
 
