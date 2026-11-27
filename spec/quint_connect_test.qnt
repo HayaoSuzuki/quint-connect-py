@@ -4,7 +4,7 @@ module quint_connect_test {
   import quint_itf as itf from "./quint_itf"
   import quint_values as qv from "./quint_values"
   import quint_connect_documents.* from "./quint_connect"
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map()).* from "./quint_connect"
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map()).* from "./quint_connect"
 
   pure val simulation: Generation =
     { expectation: SimulationCount(1), seed: sampleSeed, workspace: 1, artifactRoot: defaultArtifactRoot }

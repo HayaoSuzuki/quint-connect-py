@@ -3,8 +3,8 @@ module quint_runner_io_test {
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_itf as itf from "./quint_itf"
   import quint_connect_documents.* from "./quint_connect"
-  import quint_connect(CALL_IDS = Set(1, 2, 3), WORKSPACE_IDS = Set(1), DRIVER_IDS = Set(1, 2),
-    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map()).* from "./quint_connect"
+  import quint_connect(CALL_IDS = Set(1, 2, 3), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2),
+    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map()).* from "./quint_connect"
 
   pure val firstTrace: TracePosition = { trace: 2, traceIndex: 0 }
   pure val secondTrace: TracePosition = { trace: 41, traceIndex: 1 }
@@ -57,6 +57,28 @@ module quint_runner_io_test {
       .then(createDriver(1, FactorySucceeded(1)))
       .then(applyOperation(1, OperationApplied))
       .then(observeState(1, Observed(integerDigit(1))))
+
+  run nonRegularEntriesDoNotCountAndCleanupPreservesAliasTargetTest = {
+    val aliasPath = fs::workingPath(2, 41)
+    val error = IncompleteGeneration({ seed: sampleSeed, requested: 2, produced: 1 })
+    val entries: List[ProducedEntry] = List(
+      { name: cli::generatedFilename(List("1", "0")), trace: 41, contents: AliasEntry(evidence) },
+      { name: cli::generatedFilename(List("1", "1")), trace: 11, contents: DirectoryEntry },
+      { name: cli::generatedFilename(List("1", "2")), trace: 12, contents: OtherEntry },
+      { name: firstOutput.name, trace: firstOutput.trace, contents: RegularContents(List()) },
+    )
+    init
+      .then(runToMismatch)
+      .then(saveArtifact(1, StorageSucceeded))
+      .then(cleanWorkspace(1, StorageSucceeded))
+      .then(startRequestedRun(2, simulatorRequest(2, simulationWithCount(2)), sampleSeed, defaultArtifactRoot, itemsSelection))
+      .then(completeProcessWithEntries(2, entries))
+      .expect(fs::resolveFilePath(filesystem, aliasPath) == fs::ResolvedFile(evidence) and safety)
+      .then(listGeneratedOutput(2, ListingSucceeded))
+      .then(cleanWorkspace(2, StorageSucceeded))
+      .expect(calls.get(2).phase == Finished(failed(error)) and
+        not(filesystem.aliases.keys().contains(aliasPath)) and filesystem.files.get(evidence) == originalBytes and safety)
+  }
 
   run listingFailurePreventsReplayAndRemainsPrimaryAfterCleanupFailureTest = {
     val error = OutputListingFailed({ seed: sampleSeed, workspace: 1, cause: "directory listing failed" })

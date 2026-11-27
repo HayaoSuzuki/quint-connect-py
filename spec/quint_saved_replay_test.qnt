@@ -2,7 +2,7 @@ module quint_saved_replay_test {
   import quint_connect_documents.* from "./quint_connect"
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2),
-    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs).* from "./quint_connect"
+    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases).* from "./quint_connect"
 
   pure val firstPosition: TracePosition = { trace: 0, traceIndex: 0 }
   pure val secondPosition: TracePosition = { trace: 1, traceIndex: 1 }
@@ -11,6 +11,36 @@ module quint_saved_replay_test {
 
   def pathWasOpened(path: fs::FilePath, position: TracePosition): bool =
     hasEvent(calls.get(1).history, event => event == SavedReadAttempted({ path: path, position: position }))
+
+  run distinctAliasPathReadsTheSameTraceWithFreshDriversTest =
+    init
+      .then(startReplayPaths(1, List(fs::SavedFile("alias.itf.json"), fs::SavedFile("good.itf.json")), itemsSelection))
+      .then(readSavedPath(1, ReadSucceeded))
+      .expect(pathWasOpened(fs::SavedFile("alias.itf.json"), firstPosition))
+      .then(createDriver(1, FactorySucceeded(1)))
+      .then(applyOperation(1, OperationApplied))
+      .then(observeState(1, Observed(itemSet)))
+      .then(readSavedPath(1, ReadSucceeded))
+      .expect(pathWasOpened(fs::SavedFile("good.itf.json"), secondPosition))
+      .then(createDriver(1, FactorySucceeded(2)))
+      .then(applyOperation(1, OperationApplied))
+      .then(observeState(1, Observed(itemSet)))
+      .expect(finishedAs(Passed) and safety)
+
+  run danglingAndCyclicAliasesReportTheRequestedPathTest = {
+    val dangling = fs::SavedFile("dangling.itf.json")
+    val cyclic = fs::SavedFile("cycle.itf.json")
+    init
+      .then(startReplayPaths(1, List(dangling), itemsSelection))
+      .then(startReplayPaths(2, List(cyclic), itemsSelection))
+      .then(readSavedPath(1, ReadSucceeded))
+      .then(readSavedPath(2, ReadSucceeded))
+      .expect(finishedAs(failed(TraceFailed({
+        location: AtSavedTrace({ path: dangling, position: firstPosition }), cause: "file not found",
+      }))) and calls.get(2).phase == Finished(failed(TraceFailed({
+        location: AtSavedTrace({ path: cyclic, position: firstPosition }), cause: "alias cycle",
+      }))) and safety)
+  }
 
   run missingFileReportsItsPathAndStopsBeforeDriverTest =
     init

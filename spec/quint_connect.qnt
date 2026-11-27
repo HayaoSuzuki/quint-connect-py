@@ -203,7 +203,7 @@ module quint_connect {
   type Phase =
     | Ready
     | AwaitingGeneration(Generation)
-    | AwaitingListing({ generation: Generation, entries: List[cli::GeneratedFile] })
+    | AwaitingListing({ generation: Generation, entries: List[cli::GeneratedEntry] })
     | AwaitingValidation(TraceBatch)
     | AwaitingDriver(ValidatedTrace)
     | AwaitingOperation(ActiveTrace)
@@ -249,10 +249,12 @@ module quint_connect {
   const DRIVER_IDS: Set[DriverId]
   const GENERATED_INPUTS: Set[fs::Bytes]
   const SAVED_INPUTS: str -> fs::Bytes
+  const SAVED_ALIASES: str -> fs::FilePath
 
   pure val initialFilesystem: fs::FileSystem = {
     ...fs::emptyFileSystem,
     files: SAVED_INPUTS.keys().fold(Map(), (acc, path) => acc.put(fs::SavedFile(path), SAVED_INPUTS.get(path))),
+    aliases: SAVED_ALIASES.keys().fold(Map(), (acc, path) => acc.put(fs::SavedFile(path), SAVED_ALIASES.get(path))),
   }
 
   var calls: CallId -> CallState
@@ -654,40 +656,77 @@ module quint_connect {
   action completeProcessFailure(id: CallId, cause: str, partialOutput: fs::TraceFiles): bool =
     completeGenerationWithFiles(id, ProcessFailed(cause), fs::AbortedFiles(partialOutput))
 
-  // The child writes a basename and byte sequence for each output file.
+  // Non-regular entries appear in the listing but do not supply ITF bytes.
+  type EntryContents = RegularContents(fs::Bytes) | DirectoryEntry | AliasEntry(fs::FilePath) | OtherEntry
+  type ProducedEntry = { name: List[str], trace: TraceId, contents: EntryContents }
   type ProducedFile = { name: List[str], trace: TraceId, bytes: fs::Bytes }
 
-  pure def generatedNames(entries: List[ProducedFile]): List[cli::GeneratedFile] =
-    entries.foldl(List(), (acc, entry) => acc.append({ name: entry.name, trace: entry.trace }))
+  pure def regularEntries(files: List[ProducedFile]): List[ProducedEntry] =
+    files.foldl(List(), (entries, file) => entries.append({
+      name: file.name, trace: file.trace, contents: RegularContents(file.bytes),
+    }))
 
-  pure def generatedBytes(entries: List[ProducedFile]): fs::TraceFiles =
-    entries.foldl(Map(), (acc, entry) => acc.put(entry.trace, entry.bytes))
+  pure def directoryEntries(entries: List[ProducedEntry]): List[cli::GeneratedEntry] =
+    entries.foldl(List(), (acc, entry) => {
+      val kind = match entry.contents {
+        | RegularContents(_) => cli::RegularFile
+        | DirectoryEntry => cli::Directory
+        | AliasEntry(_) => cli::Symlink
+        | OtherEntry => cli::Other
+      }
+      acc.append({ name: entry.name, trace: entry.trace, kind: kind })
+    })
 
-  pure def distinctProducedFiles(entries: List[ProducedFile]): bool =
+  pure def generatedNames(files: List[ProducedFile]): List[cli::GeneratedEntry] =
+    directoryEntries(regularEntries(files))
+
+  pure def generatedBytes(entries: List[ProducedEntry]): fs::TraceFiles =
+    entries.foldl(Map(), (acc, entry) =>
+      match entry.contents {
+        | RegularContents(bytes) => acc.put(entry.trace, bytes)
+        | _ => acc
+      }
+    )
+
+  pure def generatedAliases(entries: List[ProducedEntry]): TraceId -> fs::FilePath =
+    entries.foldl(Map(), (acc, entry) =>
+      match entry.contents {
+        | AliasEntry(target) => acc.put(entry.trace, target)
+        | _ => acc
+      }
+    )
+
+  pure def distinctProducedEntries(entries: List[ProducedEntry]): bool =
     entries.indices().map(i => entries.nth(i).name).size() == entries.length() and
       entries.indices().map(i => entries.nth(i).trace).size() == entries.length()
 
-  action completeProcessSuccess(id: CallId, entries: List[ProducedFile]): bool =
+  action completeProcessWithEntries(id: CallId, entries: List[ProducedEntry]): bool =
     match calls.get(id).phase {
       | AwaitingGeneration(g) => {
         val output = fs::GeneratedFiles(generatedBytes(entries))
+        val aliases = generatedAliases(entries)
         all {
-          distinctProducedFiles(entries),
+          distinctProducedEntries(entries),
           fs::canRecordTraceFiles(filesystem, g.workspace, output),
+          aliases.keys().forall(trace => fs::canCreateWorkingAlias(filesystem, g.workspace, id, trace)),
           changeCallWithFiles(id, recordEvent(calls.get(id),
-            AwaitingListing({ generation: g, entries: generatedNames(entries) }), ProcessExitedSuccessfully(g)),
-            fs::recordTraceFiles(filesystem, g.workspace, output)),
+            AwaitingListing({ generation: g, entries: directoryEntries(entries) }), ProcessExitedSuccessfully(g)),
+            aliases.keys().fold(fs::recordTraceFiles(filesystem, g.workspace, output), (snapshot, trace) =>
+              fs::createWorkingAlias(snapshot, g.workspace, trace, aliases.get(trace)))),
         }
       }
       | _ => inapplicable
     }
+
+  action completeProcessSuccess(id: CallId, files: List[ProducedFile]): bool =
+    completeProcessWithEntries(id, regularEntries(files))
 
   action listGeneratedOutput(id: CallId, result: ListingResult): bool =
     match calls.get(id).phase {
       | AwaitingListing(listing) => {
         val output = match result {
           | ListingSucceeded => {
-              result: ProcessSucceeded(cli::orderedGeneratedTraces(listing.entries)),
+              result: ProcessSucceeded(cli::orderedGeneratedEntries(listing.entries)),
               basenames: listing.entries.foldl(Map(), (names, entry) => names.put(entry.trace, entry.name)),
             }
           | ListingFailed(cause) => { result: OutputUnavailable(cause), basenames: Map() }
@@ -736,13 +775,17 @@ module quint_connect {
     }
 
   pure def validateSavedFile(snapshot: fs::FileSystem, path: fs::FilePath, result: ReadResult, selection: itf::Selection): ValidationResult = {
-    if (not(snapshot.files.keys().contains(path)))
-      InvalidItf({ location: InvalidFile, cause: "file not found" })
-    else
-      match result {
-        | ReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
-        | ReadSucceeded => validationForBytes(snapshot.files.get(path), selection)
-      }
+    match fs::readFileBytes(snapshot, path) {
+      | FileUnavailable(problem) => InvalidItf({
+          location: InvalidFile,
+          cause: if (problem == fs::AliasCycle) "alias cycle" else "file not found",
+        })
+      | FileBytes(bytes) =>
+        match result {
+          | ReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
+          | ReadSucceeded => validationForBytes(bytes, selection)
+        }
+    }
   }
 
   action readSavedPath(id: CallId, result: ReadResult): bool =
@@ -1569,6 +1612,8 @@ module quint_connect {
         startReplayPaths(id, List(fs::SavedFile("good.itf.json"), fs::SavedFile("missing.itf.json")),
           { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         startSampledEvidenceReplay(id, workspace, { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
+        startReplayPaths(id, List(fs::SavedFile("alias.itf.json")),
+          { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         readSavedPath(id, ReadSucceeded),
         readSavedPath(id, ReadFailed("permission denied")),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(1)),
@@ -1586,6 +1631,10 @@ module quint_connect {
           List({ name: cli::generatedFilename(List("1", "0")), trace: 1, bytes: producedBytes },
             { name: cli::generatedFilename(List("2")), trace: 0, bytes: producedBytes })
         ),
+        completeProcessWithEntries(id, List(
+          { name: cli::generatedFilename(List("1")), trace: 1, contents: AliasEntry(fs::SavedFile("good.itf.json")) },
+          { name: cli::generatedFilename(List("2")), trace: 0, contents: RegularContents(producedBytes) },
+        )),
         completeProcessFailure(id, "Quint failed", Map(0 -> List(123))),
         listGeneratedOutput(id, ListingSucceeded),
         listGeneratedOutput(id, ListingFailed("output listing failed")),
@@ -1668,13 +1717,20 @@ module quint_connect_documents {
     "named.itf.json" -> namedBytes,
   )
 
+  pure val savedAliases: str -> fs::FilePath = Map(
+    "alias.itf.json" -> fs::SavedFile("good.itf.json"),
+    "dangling.itf.json" -> fs::SavedFile("missing.itf.json"),
+    "cycle.itf.json" -> fs::SavedFile("cycle-hop.itf.json"),
+    "cycle-hop.itf.json" -> fs::SavedFile("cycle.itf.json"),
+  )
+
   pure val generatedInputs: Set[fs::Bytes] = Set(originalBytes, otherBytes, namedBytes)
 
 }
 
 module quint_connect_sample {
   import quint_connect_documents.*
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs).*
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases).*
 
   observation replayStarted = anyCallHas(event =>
     match event {
