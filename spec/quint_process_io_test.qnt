@@ -98,4 +98,16 @@ module quint_process_io_test {
     init
       .then(startRun(1, generation))
       .then(failWaitWithoutExitConfirmation.fail())
+
+  run cleanupInvariantRequiresExitEvidenceAfterSpawnTest = {
+    val generation = { expectation: SimulationCount(1), seed: sampleSeed, workspace: 7, artifactRoot: defaultArtifactRoot }
+    val reserved = List(WorkspaceReserved(generation))
+    val running = reserved.append(ProcessStarted(generation))
+    val stopped = running.append(ProcessExitedSuccessfully(generation))
+    assert(and {
+      cleanupHasExitEvidence(reserved, reserved.length(), 7),
+      not(cleanupHasExitEvidence(running, running.length(), 7)),
+      cleanupHasExitEvidence(stopped, stopped.length(), 7),
+    })
+  }
 }

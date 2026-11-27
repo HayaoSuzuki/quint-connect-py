@@ -1554,6 +1554,30 @@ module quint_connect {
         }
     }
 
+  pure def cleanupHasExitEvidence(history: List[Event], index: int, workspace: WorkspaceId): bool = {
+    val started = hasPrior(history, index, event =>
+      match event {
+        | ProcessStarted(g) => g.workspace == workspace
+        | _ => false
+      }
+    )
+    not(started) or hasPrior(history, index, event =>
+      match event {
+        | ProcessExitedSuccessfully(g) => g.workspace == workspace
+        | ChildExitConfirmed(g) => g.workspace == workspace
+        | GenerationCompleted(completion) =>
+          completion.generation.workspace == workspace and
+            (match completion.result {
+              | ProcessFailed(problem) => isExitProblem(problem)
+              | _ => false
+            })
+        | ProcessIoFailed(failure) =>
+          failure.generation.workspace == workspace and failure.exit != ExitUnconfirmed
+        | _ => false
+      }
+    )
+  }
+
   pure def childExitUnconfirmed(history: List[Event], index: int, workspace: WorkspaceId): bool =
     hasPrior(history, index, event =>
       match event {
@@ -1713,10 +1737,15 @@ module quint_connect {
                     event == ProcessExitedSuccessfully(completed.generation))
               })
           | ProcessIoFailed(failure) =>
-            previousIs(history, index, event => event == ProcessStarted(failure.generation))
+            previousIs(history, index, event => event == ProcessStarted(failure.generation)) and
+              (if (history.indices().contains(index + 1))
+                history.nth(index + 1) == FailureRecognized(processIoError(failure.generation, failure.problem))
+              else false)
           | ChildExitConfirmed(g) => childExitUnconfirmed(history, index, g.workspace)
           | CleanupAttempted(cleaned) =>
-            ownsWorkspace(history, cleaned.workspace) and not(childExitUnconfirmed(history, index, cleaned.workspace))
+            ownsWorkspace(history, cleaned.workspace) and
+              cleanupHasExitEvidence(history, index, cleaned.workspace) and
+              not(childExitUnconfirmed(history, index, cleaned.workspace))
           | WorkspaceCleanupDeferred(note) =>
             if (ownsWorkspace(history, note.workspace))
               childExitUnconfirmed(history, index, note.workspace) and
