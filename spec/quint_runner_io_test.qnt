@@ -75,11 +75,31 @@ module quint_runner_io_test {
       .then(startRequestedRun(2, simulatorRequest(2, simulationWithCount(2)), sampleSeed, defaultArtifactRoot, itemsSelection))
       .then(startProcess(2))
       .then(completeProcessWithEntries(2, entries))
-      .expect(fs::resolveFilePath(filesystem, aliasPath) == fs::ResolvedFile(evidence) and safety)
+      .expect(fs::resolveFilePath(filesystem, aliasPath) == fs::ResolvedFile(evidence) and
+        fs::workingNonFiles(filesystem, 2) == Map(11 -> fs::WorkspaceDirectory, 12 -> fs::WorkspaceSpecial) and safety)
       .then(listGeneratedOutput(2, ListingSucceeded))
       .then(cleanWorkspace(2, StorageSucceeded))
       .expect(calls.get(2).phase == Finished(failed(error)) and
+        fs::workingEntries(filesystem, 2).size() == 0 and
         not(filesystem.aliases.keys().contains(aliasPath)) and filesystem.files.get(evidence) == originalBytes and safety)
+  }
+
+  run interruptedCleanupRetainsOnlyTheReportedDirectoryTest = {
+    val error = IncompleteGeneration({ seed: sampleSeed, requested: 2, produced: 1 })
+    val entries: List[ProducedEntry] = List(
+      { name: firstOutput.name, trace: firstOutput.trace, contents: RegularContents(originalBytes) },
+      { name: thirdOutput.name, trace: thirdOutput.trace, contents: DirectoryEntry },
+      { name: cli::generatedFilename(List("1", "2")), trace: 12, contents: OtherEntry },
+    )
+    init
+      .then(startGeneratedRun(2))
+      .then(startProcess(1))
+      .then(completeProcessWithEntries(1, entries))
+      .then(listGeneratedOutput(1, ListingSucceeded))
+      .then(cleanWorkspaceWithRemoval(1, StorageFailed("cleanup interrupted"), fs::RemoveInterrupted(Set(11))))
+      .expect(calls.get(1).phase == Finished(Failed({ error: error, cleanup: CleanupAlsoFailed("cleanup interrupted") })) and
+        fs::workingEntries(filesystem, 1) == Set(11) and
+        fs::workingNonFiles(filesystem, 1) == Map(11 -> fs::WorkspaceDirectory) and safety)
   }
 
   run listingFailurePreventsReplayAndRemainsPrimaryAfterCleanupFailureTest = {

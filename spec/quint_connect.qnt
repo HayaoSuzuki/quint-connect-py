@@ -842,6 +842,15 @@ module quint_connect {
       }
     )
 
+  pure def generatedNonFiles(entries: List[ProducedEntry]): TraceId -> fs::WorkspaceNonFile =
+    entries.foldl(Map(), (acc, entry) =>
+      match entry.contents {
+        | DirectoryEntry => acc.put(entry.trace, fs::WorkspaceDirectory)
+        | OtherEntry => acc.put(entry.trace, fs::WorkspaceSpecial)
+        | _ => acc
+      }
+    )
+
   pure def distinctProducedEntries(entries: List[ProducedEntry]): bool =
     entries.indices().map(i => entries.nth(i).name).size() == entries.length() and
       entries.indices().map(i => entries.nth(i).trace).size() == entries.length()
@@ -851,14 +860,21 @@ module quint_connect {
       | AwaitingGeneration(g) => {
         val output = fs::GeneratedFiles(generatedBytes(entries))
         val aliases = generatedAliases(entries)
+        val nonFiles = generatedNonFiles(entries)
         all {
           distinctProducedEntries(entries),
           fs::canRecordTraceFiles(filesystem, g.workspace, output),
           aliases.keys().forall(trace => fs::canCreateWorkingAlias(filesystem, g.workspace, id, trace)),
-          changeCallWithFiles(id, recordEvent(calls.get(id),
-            AwaitingListing({ generation: g, entries: directoryEntries(entries) }), ProcessExitedSuccessfully(g)),
-            aliases.keys().fold(fs::recordTraceFiles(filesystem, g.workspace, output), (snapshot, trace) =>
-              fs::createWorkingAlias(snapshot, g.workspace, trace, aliases.get(trace)))),
+          nonFiles.keys().forall(trace => fs::canCreateWorkingNonFile(filesystem, g.workspace, id, trace)),
+          {
+            val regular = fs::recordTraceFiles(filesystem, g.workspace, output)
+            val withAliases = aliases.keys().fold(regular, (snapshot, trace) =>
+              fs::createWorkingAlias(snapshot, g.workspace, trace, aliases.get(trace)))
+            val withNonFiles = nonFiles.keys().fold(withAliases, (snapshot, trace) =>
+              fs::createWorkingNonFile(snapshot, g.workspace, trace, nonFiles.get(trace)))
+            changeCallWithFiles(id, recordEvent(calls.get(id),
+              AwaitingListing({ generation: g, entries: directoryEntries(entries) }), ProcessExitedSuccessfully(g)), withNonFiles)
+          },
         }
       }
       | _ => inapplicable
