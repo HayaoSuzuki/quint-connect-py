@@ -14,23 +14,27 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "spec" / "quint_conformance.qnt"
 FIXTURES = ROOT / "spec" / "fixtures" / "runner-conformance.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 BACKENDS = ("typescript", "rust")
 EVENTS = {
     "CommandPrepared",
     "WorkspaceReserved",
     "ProcessStarted",
     "ProcessExitedSuccessfully",
+    "ProcessIoFailed",
+    "ChildExitConfirmed",
     "GenerationCompleted",
     "SavedReadAttempted",
     "GeneratedReadAttempted",
     "FactoryCalled",
     "DriverCreated",
     "OperationCalled",
+    "DriverArgumentsChanged",
     "ObservationCalled",
     "ArtifactDirectoryTried",
     "SaveAttempted",
     "CleanupAttempted",
+    "WorkspaceCleanupDeferred",
 }
 
 
@@ -113,14 +117,6 @@ def project(value):
         return value
     if value.keys() == {"nodes", "root"}:
         return itf_value(value)
-    if value.keys() == {"name", "arguments"}:
-        return {
-            "name": from_code_points(value["name"]),
-            "arguments": {
-                from_code_points(key): itf_value(argument)
-                for key, argument in value["arguments"]["#map"]
-            },
-        }
     if value.keys() == {"actionPath", "statePath"}:
         return {key: [from_code_points(segment) for segment in path] for key, path in value.items()}
     if value.keys() == {"name", "trace", "bytes"}:
@@ -134,7 +130,16 @@ def project(value):
         else:
             payload = project(payload)
         return {"tag": tag, "value": payload}
-    result = {key: project(item) for key, item in value.items()}
+    result = {}
+    for key, item in value.items():
+        if key == "arguments":
+            result[key] = {
+                from_code_points(name): itf_value(argument) for name, argument in item["#map"]
+            }
+        elif key == "name" and "arguments" in value:
+            result[key] = from_code_points(item)
+        else:
+            result[key] = project(item)
     if "basename" in result:
         result["basename"] = "".join(result["basename"])
     if "basenames" in result:
@@ -156,15 +161,32 @@ def project_file(path, contents):
 def fixture_case(trace_file):
     trace = json.loads(trace_file.read_text(encoding="utf-8"))
     initial, terminal = trace["states"][0], trace["states"][-1]
-    fixture = state_variable(terminal, "fixture")
-    call = dict(state_variable(terminal, "calls")["#map"])[1]
-    if call["phase"]["tag"] != "Finished":
-        raise ValueError(f"Scenario did not finish: {trace_file.name}")
-    paths = (
-        set(fixture["request"]["value"]["paths"])
-        if fixture["request"]["tag"] == "ReplayPaths"
-        else set()
-    )
+    schedule = [
+        {"call_id": entry["callId"], "input": project(entry["input"])}
+        for entry in state_variable(terminal, "schedule")
+    ]
+    requests = {
+        entry["call_id"]: entry["input"]["value"]
+        for entry in schedule
+        if entry["input"]["tag"] == "Start"
+    }
+    call_states = dict(state_variable(terminal, "calls")["#map"])
+    calls = []
+    for call_id in sorted(requests):
+        call = call_states[call_id]
+        if call["phase"]["tag"] != "Finished":
+            raise ValueError(f"Call {call_id} did not finish: {trace_file.name}")
+        calls.append({
+            "call_id": call_id,
+            "events": [project(event) for event in call["history"] if event["tag"] in EVENTS],
+            "outcome": project(call["phase"]["value"]),
+        })
+    paths = {
+        path
+        for request in requests.values()
+        if request["tag"] == "ReplayPaths"
+        for path in request["value"]["paths"]
+    }
     input_files = [
         project_file(path, contents)
         for path, contents in state_variable(initial, "filesystem")["files"]["#map"]
@@ -173,12 +195,10 @@ def fixture_case(trace_file):
     final_files = state_variable(terminal, "filesystem")["files"]["#map"]
     return {
         "name": trace_file.name.removeprefix("case-").removesuffix("Test.itf.json"),
-        "request": project(fixture["request"]),
+        "schedule": schedule,
         "input_files": input_files,
-        "responses": project(fixture["responses"]),
         "expected": {
-            "events": [project(event) for event in call["history"] if event["tag"] in EVENTS],
-            "outcome": project(call["phase"]["value"]),
+            "calls": calls,
             "saved_files": [
                 project_file(path, contents)
                 for path, contents in final_files
