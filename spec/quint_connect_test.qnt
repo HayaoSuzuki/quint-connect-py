@@ -97,17 +97,20 @@ module quint_connect_test {
     init
       .then(startRun(1, simulation))
       .then(startRun(2, { ...namedGeneration, expectation: SimulationCount(2) }))
-      .then(completeGeneration(1, ProcessFailed("Quint exited unsuccessfully")))
+      .then(startProcess(1))
+      .then(completeGeneration(1, ProcessFailed(NonzeroExit({ code: 1, output: noProcessOutput }))))
+      .then(startProcess(2))
       .then(completeGeneration(2, ProcessSucceeded(List(7))))
       .then(cleanWorkspace(2, StorageSucceeded))
       .then(cleanWorkspace(1, StorageSucceeded))
-      .expect(finishedAs(1, failed(QuintFailed({ seed: sampleSeed, cause: "Quint exited unsuccessfully" }))) and
+      .expect(finishedAs(1, failed(QuintFailed({ seed: sampleSeed, problem: NonzeroExit({ code: 1, output: noProcessOutput }) }))) and
         finishedAs(2, failed(IncompleteGeneration({ seed: sampleSeed, requested: 2, produced: 1 }))) and safety)
 
   run reservationAndNoGeneratedTracesTest =
     init
       .then(failReservation(1, sampleSeed, "cannot reserve"))
       .then(startRun(2, namedGeneration))
+      .then(startProcess(2))
       .then(completeGeneration(2, ProcessSucceeded(List())))
       .then(cleanWorkspace(2, StorageSucceeded))
       .expect(finishedAs(1, failed(WorkspaceFailed({ seed: sampleSeed, stage: Reserve, cause: "cannot reserve" }))) and
@@ -140,6 +143,7 @@ module quint_connect_test {
   run generatedAndSavedMismatchAgreeTest =
     init
       .then(startRun(1, simulation))
+      .then(startProcess(1))
       .then(completeGeneration(1, ProcessSucceeded(List(7, 8))))
       .then(validateTrace(1, ValidSteps(List(openingStep, incrementStep))))
       .then(createDriver(1, FactorySucceeded(1)))
@@ -176,7 +180,9 @@ module quint_connect_test {
     init
       .then(startRun(1, simulation))
       .then(startRun(2, namedGeneration))
+      .then(startProcess(2))
       .then(completeGeneration(2, ProcessSucceeded(List(7))))
+      .then(startProcess(1))
       .then(completeGeneration(1, ProcessSucceeded(List(7))))
       .then(makeFirstStep(2, 2))
       .then(makeFirstStep(1, 1))
@@ -198,6 +204,7 @@ module quint_connect_test {
   run saveFailureRetainsMismatchTest =
     init
       .then(startRun(1, simulation))
+      .then(startProcess(1))
       .then(completeGeneration(1, ProcessSucceeded(List(7))))
       .then(makeFirstStep(1, 1))
       .then(observeState(1, Observed(integerDigit(1))))
@@ -212,7 +219,9 @@ module quint_connect_test {
     init
       .then(startRun(1, simulation))
       .then(startRun(2, namedGeneration))
+      .then(startProcess(1))
       .then(completeGeneration(1, ProcessSucceeded(List(7))))
+      .then(startProcess(2))
       .then(completeGeneration(2, ProcessSucceeded(List(7))))
       .then(makeFirstStep(1, 1))
       .then(makeFirstStep(2, 2))
@@ -327,6 +336,7 @@ module quint_connect_test {
     val savedMismatch = { ...compoundMismatch, position: { trace: { trace: 0, traceIndex: 0 }, stepIndex: 0 } }
     init
       .then(startRequestedRun(1, sampleRequest, sampleSeed, "evidence", itemsSelection))
+      .then(startProcess(1))
       .then(completeProcessSuccess(1, reverseDirectoryListing))
       .then(listGeneratedOutput(1, ListingSucceeded))
       .then(validateGeneratedDocument(1, originalBytes))
@@ -352,6 +362,7 @@ module quint_connect_test {
   run wrongGeneratedBytesCannotBePassedToDecoderTest =
     init
       .then(startRequestedRun(1, sampleRequest, sampleSeed, "evidence", itemsSelection))
+      .then(startProcess(1))
       .then(completeProcessSuccess(1, reverseDirectoryListing))
       .then(listGeneratedOutput(1, ListingSucceeded))
       .then(validateGeneratedDocument(1, otherBytes).fail())
@@ -366,11 +377,12 @@ module quint_connect_test {
   run failedProcessOutputIsUnreadableAndRemovedTest =
     init
       .then(startRequestedRun(1, sampleRequest, sampleSeed, "evidence", itemsSelection))
-      .then(completeProcessFailure(1, "nonzero exit", Map(2 -> originalBytes)))
+      .then(startProcess(1))
+      .then(completeProcessFailure(1, NonzeroExit({ code: 2, output: noProcessOutput }), Map(2 -> originalBytes)))
       .expect(filesystem.files.get(fs::workingPath(1, 2)) == originalBytes)
       .expect(not(fs::canReadGeneratedFile(filesystem, 1, 2)))
       .then(cleanWorkspace(1, StorageSucceeded))
-      .expect(finishedAs(1, failed(QuintFailed({ seed: cli::maxSeed, cause: "nonzero exit" }))) and
+      .expect(finishedAs(1, failed(QuintFailed({ seed: cli::maxSeed, problem: NonzeroExit({ code: 2, output: noProcessOutput }) }))) and
         filesystem.files.keys().size() == 0 and safety)
 
   run namedTestRequiresAndUsesItsExplicitOperationPathTest =
@@ -382,6 +394,7 @@ module quint_connect_test {
       .then(startRequestedRun(2, { ...sampleRequest,
         config: cli::NamedTestMode({ name: List(97), maxSamples: cli::CliDefault }),
       }, sampleSeed, "evidence", { actionPath: List(List(100, 105, 115, 112, 97, 116, 99, 104)), statePath: List(List(105, 116, 101, 109, 115)) }))
+      .then(startProcess(2))
       .then(completeProcessSuccess(2, List({ name: cli::generatedFilename(List("0")), trace: 0, bytes: namedBytes })))
       .then(listGeneratedOutput(2, ListingSucceeded))
       .then(validateGeneratedDocument(2, namedBytes))
@@ -395,6 +408,7 @@ module quint_connect_test {
     init
       .then(startRequestedRun(1, { ...sampleRequest, config: simulationWithCount(1) },
         sampleSeed, "evidence", itemsSelection))
+      .then(startProcess(1))
       .then(completeProcessSuccess(1, List({ name: cli::generatedFilename(List("0")), trace: 0, bytes: List(123) })))
       .then(listGeneratedOutput(1, ListingSucceeded))
       .then(validateGeneratedDocument(1, List(123)))

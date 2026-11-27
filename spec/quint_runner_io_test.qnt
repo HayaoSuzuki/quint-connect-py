@@ -51,6 +51,7 @@ module quint_runner_io_test {
 
   action runToMismatch: bool =
     startGeneratedRun(1)
+      .then(startProcess(1))
       .then(completeProcessSuccess(1, List(firstOutput)))
       .then(listGeneratedOutput(1, ListingSucceeded))
       .then(readGeneratedInput(1, ReadSucceeded))
@@ -72,6 +73,7 @@ module quint_runner_io_test {
       .then(saveArtifact(1, StorageSucceeded))
       .then(cleanWorkspace(1, StorageSucceeded))
       .then(startRequestedRun(2, simulatorRequest(2, simulationWithCount(2)), sampleSeed, defaultArtifactRoot, itemsSelection))
+      .then(startProcess(2))
       .then(completeProcessWithEntries(2, entries))
       .expect(fs::resolveFilePath(filesystem, aliasPath) == fs::ResolvedFile(evidence) and safety)
       .then(listGeneratedOutput(2, ListingSucceeded))
@@ -84,6 +86,7 @@ module quint_runner_io_test {
     val error = OutputListingFailed({ seed: sampleSeed, workspace: 1, cause: "directory listing failed" })
     init
       .then(startGeneratedRun(2))
+      .then(startProcess(1))
       .then(completeProcessSuccess(1, List(secondOutput, firstOutput)))
       .expect(calls.get(1).phase == AwaitingListing({
         generation: generation(2), entries: generatedNames(List(secondOutput, firstOutput)),
@@ -104,6 +107,7 @@ module quint_runner_io_test {
     })
     init
       .then(startGeneratedRun(3))
+      .then(startProcess(1))
       .then(completeProcessSuccess(1, List(thirdOutput, secondOutput, firstOutput)))
       .then(listGeneratedOutput(1, ListingSucceeded))
       .then(readGeneratedInput(1, ReadSucceeded))

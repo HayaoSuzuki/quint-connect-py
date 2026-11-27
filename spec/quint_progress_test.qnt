@@ -30,6 +30,7 @@ module quint_progress_test {
     init
       .then(startReplay(2, List()))
       .then(startRun(1, generation))
+      .then(startProcess(1))
       .then(completeGeneration(1, ProcessSucceeded(List(2))))
       .expect(processingProgress)
       .then(step)
@@ -41,6 +42,7 @@ module quint_progress_test {
     val artifact = fs::evidencePath(defaultArtifactRoot, 1, 2)
     init
       .then(startRun(1, generation))
+      .then(startProcess(1))
       .then(completeGeneration(1, ProcessSucceeded(List(2))))
       .then(validateTrace(1, ValidSteps(List(openingStep))))
       .then(createDriver(1, FactorySucceeded(1)))

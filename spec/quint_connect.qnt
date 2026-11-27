@@ -83,8 +83,26 @@ module quint_connect {
     stepIndex: int,
   }
 
-  // Internal generation result, with filenames ordered by completeProcessSuccess.
-  type GenerationResult = ProcessFailed(str) | OutputUnavailable(str) | ProcessSucceeded(List[TraceId])
+  type ProcessOutput = { stdout: fs::Bytes, stderr: fs::Bytes }
+  type ProcessProblem =
+    | SpawnFailure(str)
+    | NonzeroExit({ code: int, output: ProcessOutput })
+    | SignalExit({ signal: int, output: ProcessOutput })
+
+  // Successful process output is listed before replay.
+  type GenerationResult = ProcessFailed(ProcessProblem) | OutputUnavailable(str) | ProcessSucceeded(List[TraceId])
+
+  pure val noProcessOutput: ProcessOutput = { stdout: List(), stderr: List() }
+
+  pure def validProcessOutput(output: ProcessOutput): bool =
+    fs::validBytes(output.stdout) and fs::validBytes(output.stderr)
+
+  pure def isExitProblem(problem: ProcessProblem): bool =
+    match problem {
+      | SpawnFailure(_) => false
+      | NonzeroExit(exit) => exit.code != 0 and validProcessOutput(exit.output)
+      | SignalExit(exit) => exit.signal > 0 and validProcessOutput(exit.output)
+    }
 
   type ListingResult = ListingSucceeded | ListingFailed(str)
 
@@ -187,7 +205,7 @@ module quint_connect {
   type Failure =
     | InvalidRequest(RequestProblem)
     | WorkspaceFailed({ seed: Seed, stage: WorkspaceStage, cause: str })
-    | QuintFailed({ seed: Seed, cause: str })
+    | QuintFailed({ seed: Seed, problem: ProcessProblem })
     | ExecutableLookupFailed({ seed: Seed, problem: path::Resolution })
     | OutputListingFailed({ seed: Seed, workspace: WorkspaceId, cause: str })
     | EmptyTrace(EmptyInput)
@@ -202,6 +220,7 @@ module quint_connect {
 
   type Phase =
     | Ready
+    | AwaitingSpawn(Generation)
     | AwaitingGeneration(Generation)
     | AwaitingListing({ generation: Generation, entries: List[cli::GeneratedEntry] })
     | AwaitingValidation(TraceBatch)
@@ -223,6 +242,7 @@ module quint_connect {
         request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand, target: ExecutionTarget,
       })
     | WorkspaceReserved(Generation)
+    | ProcessStarted(Generation)
     | ProcessExitedSuccessfully(Generation)
     | GenerationCompleted({ generation: Generation, result: GenerationResult, basenames: TraceBasenames })
     | ValidationAttempted(TracePosition)
@@ -309,7 +329,7 @@ module quint_connect {
     val recorded = recordEvent(s, s.phase, GenerationCompleted({ generation: g, result: result, basenames: basenames }))
     val source = GeneratedItf(g)
     match result {
-      | ProcessFailed(cause) => stop(recorded, source, QuintFailed({ seed: g.seed, cause: cause }))
+      | ProcessFailed(problem) => stop(recorded, source, QuintFailed({ seed: g.seed, problem: problem }))
       | OutputUnavailable(cause) => stop(recorded, source, OutputListingFailed({
           seed: g.seed, workspace: g.workspace, cause: cause,
         }))
@@ -542,7 +562,7 @@ module quint_connect {
     fs::canReserveFiles(filesystem, g.workspace, id),
     changeCallWithFiles(
       id,
-      recordEvent(requestState, AwaitingGeneration(g), WorkspaceReserved(g)),
+      recordEvent(requestState, AwaitingSpawn(g), WorkspaceReserved(g)),
       fs::reserveFiles(filesystem, g.workspace, id, g.seed, g.artifactRoot)
     ),
   }
@@ -623,14 +643,34 @@ module quint_connect {
     changeCall(id, stop(calls.get(id), SavedItf, WorkspaceFailed({ seed: seed, stage: Reserve, cause: cause }))),
   }
 
+  action startProcess(id: CallId): bool =
+    match calls.get(id).phase {
+      | AwaitingSpawn(g) =>
+        changeCall(id, recordEvent(calls.get(id), AwaitingGeneration(g), ProcessStarted(g)))
+      | _ => inapplicable
+    }
+
+  action failSpawn(id: CallId, cause: str): bool =
+    match calls.get(id).phase {
+      | AwaitingSpawn(g) => {
+        val output = fs::AbortedFiles(Map())
+        all {
+          fs::canRecordTraceFiles(filesystem, g.workspace, output),
+          changeCallWithFiles(id, onGeneration(calls.get(id), g, ProcessFailed(SpawnFailure(cause)), Map()),
+            fs::recordTraceFiles(filesystem, g.workspace, output)),
+        }
+      }
+      | _ => inapplicable
+    }
+
   pure def traceSet(traces: List[TraceId]): Set[TraceId] =
     traces.foldl(Set(), (distinct, trace) => distinct.union(Set(trace)))
 
   pure def generationFilesAgree(result: GenerationResult, output: fs::GenerationFiles): bool =
     match result {
-      | ProcessFailed(_) =>
+      | ProcessFailed(problem) =>
         match output {
-          | AbortedFiles(_) => true
+          | AbortedFiles(_) => isExitProblem(problem)
           | _ => false
         }
       | OutputUnavailable(_) => false
@@ -660,8 +700,8 @@ module quint_connect {
       | _ => inapplicable
     }
 
-  action completeProcessFailure(id: CallId, cause: str, partialOutput: fs::TraceFiles): bool =
-    completeGenerationWithFiles(id, ProcessFailed(cause), fs::AbortedFiles(partialOutput))
+  action completeProcessFailure(id: CallId, problem: ProcessProblem, partialOutput: fs::TraceFiles): bool =
+    completeGenerationWithFiles(id, ProcessFailed(problem), fs::AbortedFiles(partialOutput))
 
   // Non-regular entries appear in the listing but do not supply ITF bytes.
   type EntryContents = RegularContents(fs::Bytes) | DirectoryEntry | AliasEntry(fs::FilePath) | OtherEntry
@@ -746,7 +786,7 @@ module quint_connect {
   // Existing lifecycle scenarios give ordered trace IDs and omit byte contents.
   action completeGeneration(id: CallId, result: GenerationResult): bool =
     match result {
-      | ProcessFailed(cause) => completeProcessFailure(id, cause, Map())
+      | ProcessFailed(problem) => completeProcessFailure(id, problem, Map())
       | ProcessSucceeded(paths) =>
         completeGenerationWithFiles(id, result, fs::GeneratedFiles(traceSet(paths).mapBy(_ => List())))
       | OutputUnavailable(_) => inapplicable
@@ -1445,13 +1485,21 @@ module quint_connect {
           | PathSearchCompleted(lookup) =>
             lookup.result == path::searchPath(lookup.callerDirectory, lookup.name,
               lookup.environment.directories, lookup.environment.observations)
+          | ProcessStarted(g) =>
+            previousIs(history, index, event => event == WorkspaceReserved(g))
           | ProcessExitedSuccessfully(g) =>
-            hasPrior(history, index, event => event == WorkspaceReserved(g))
+            hasPrior(history, index, event => event == ProcessStarted(g))
           | GenerationCompleted(completed) =>
             hasPrior(history, index, event => event == WorkspaceReserved(completed.generation)) and
               (match completed.result {
-                | ProcessFailed(_) => not(hasPrior(history, index, event =>
-                    event == ProcessExitedSuccessfully(completed.generation)))
+                | ProcessFailed(problem) =>
+                  not(hasPrior(history, index, event => event == ProcessExitedSuccessfully(completed.generation))) and
+                    (match problem {
+                      | SpawnFailure(_) =>
+                        previousIs(history, index, event => event == WorkspaceReserved(completed.generation))
+                      | _ => isExitProblem(problem) and
+                        previousIs(history, index, event => event == ProcessStarted(completed.generation))
+                    })
                 | _ => previousIs(history, index, event =>
                     event == ProcessExitedSuccessfully(completed.generation))
               })
@@ -1512,7 +1560,8 @@ module quint_connect {
   // work at a lower position, such as the number of steps in a new trace.
   pure def callWork(state: CallState, snapshot: fs::FileSystem): List[int] =
     match state.phase {
-      | Ready => List(7, 0, 0, 0, 0)
+      | Ready => List(8, 0, 0, 0, 0)
+      | AwaitingSpawn(_) => List(7, 0, 0, 0, 0)
       | AwaitingGeneration(_) => List(6, 0, 0, 0, 0)
       | AwaitingListing(_) => List(5, 0, 0, 0, 0)
       | AwaitingValidation(batch) => List(4, pendingTraces(batch), 3, 0, 0)
@@ -1549,6 +1598,7 @@ module quint_connect {
   def hasNextResponse(id: CallId): bool =
     match calls.get(id).phase {
       | Ready => true // The caller can submit a replay.
+      | AwaitingSpawn(_) => true
       | AwaitingGeneration(g) =>
         fs::canRecordTraceFiles(filesystem, g.workspace, fs::AbortedFiles(Map()))
       | AwaitingListing(_) => true // The listing may succeed or fail.
@@ -1717,6 +1767,8 @@ module quint_connect {
         startRequestedRun(id, simulatorRequest(workspace, cli::NamedTestMode({ name: List(97), maxSamples: cli::CliDefault })),
           sampleSeed, defaultArtifactRoot, { actionPath: List(List(100, 105, 115, 112, 97, 116, 99, 104)), statePath: List(List(105, 116, 101, 109, 115)) }),
         failReservation(id, sampleSeed, "temporary directory unavailable"),
+        startProcess(id),
+        failSpawn(id, "could not start Quint"),
         completeProcessSuccess(id, List()),
         completeProcessSuccess(id,
           List({ name: cli::generatedFilename(List("2")), trace: 0, bytes: producedBytes })
@@ -1729,7 +1781,8 @@ module quint_connect {
           { name: cli::generatedFilename(List("1")), trace: 1, contents: AliasEntry(fs::SavedFile("good.itf.json")) },
           { name: cli::generatedFilename(List("2")), trace: 0, contents: RegularContents(producedBytes) },
         )),
-        completeProcessFailure(id, "Quint failed", Map(0 -> List(123))),
+        completeProcessFailure(id, NonzeroExit({ code: 1, output: noProcessOutput }), Map(0 -> List(123))),
+        completeProcessFailure(id, SignalExit({ signal: 15, output: noProcessOutput }), Map(0 -> List(123))),
         listGeneratedOutput(id, ListingSucceeded),
         listGeneratedOutput(id, ListingFailed("output listing failed")),
         readGeneratedInput(id, ReadSucceeded),
@@ -1874,6 +1927,39 @@ module quint_connect_sample {
             }
           | _ => false
         }
+      | _ => false
+    }
+  )
+
+  def processFailureObserved(matches: (ProcessProblem) => bool): bool =
+    anyCallHas(event =>
+      match event {
+        | FailureRecognized(error) =>
+          match error {
+            | QuintFailed(failure) => matches(failure.problem)
+            | _ => false
+          }
+        | _ => false
+      }
+    )
+
+  observation spawnFailed = processFailureObserved(problem =>
+    match problem {
+      | SpawnFailure(_) => true
+      | _ => false
+    }
+  )
+
+  observation processExitedNonzero = processFailureObserved(problem =>
+    match problem {
+      | NonzeroExit(_) => true
+      | _ => false
+    }
+  )
+
+  observation processWasSignaled = processFailureObserved(problem =>
+    match problem {
+      | SignalExit(_) => true
       | _ => false
     }
   )

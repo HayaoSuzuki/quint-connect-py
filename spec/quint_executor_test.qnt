@@ -26,10 +26,10 @@ module quint_executor_test {
           | CommandPrepared(plan) => plan.target == ExecutableOnPath(fallback) and plan.command.workspace == 7
           | _ => false
         }) and filesystem.workspaces.get(7).owner == 1 and safety)
-      .then(completeProcessFailure(1, "launch failed after selection", Map()))
+      .then(failSpawn(1, "launch failed after selection"))
       .then(cleanWorkspace(1, StorageSucceeded))
       .expect(calls.get(1).phase == Finished(failed(QuintFailed({
-        seed: sampleSeed, cause: "launch failed after selection",
+        seed: sampleSeed, problem: SpawnFailure("launch failed after selection"),
       }))) and safety)
 
   run pathLookupFailurePreservesFirstCauseWithoutWorkDirectoryTest =
