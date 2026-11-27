@@ -84,10 +84,14 @@ module quint_connect {
   }
 
   type ProcessOutput = { stdout: fs::Bytes, stderr: fs::Bytes }
+  type ProcessIoStage = WaitForExit | CollectOutput
+  type ProcessIoProblem = { stage: ProcessIoStage, cause: str }
+  type ExitKnowledge = ExitConfirmed(fs::TraceFiles) | ExitUnconfirmed
   type ProcessProblem =
     | SpawnFailure(str)
     | NonzeroExit({ code: int, output: ProcessOutput })
     | SignalExit({ signal: int, output: ProcessOutput })
+    | ProcessIoFailure(ProcessIoProblem)
 
   // Successful process output is listed before replay.
   type GenerationResult = ProcessFailed(ProcessProblem) | OutputUnavailable(str) | ProcessSucceeded(List[TraceId])
@@ -100,6 +104,7 @@ module quint_connect {
   pure def isExitProblem(problem: ProcessProblem): bool =
     match problem {
       | SpawnFailure(_) => false
+      | ProcessIoFailure(_) => false
       | NonzeroExit(exit) => exit.code != 0 and validProcessOutput(exit.output)
       | SignalExit(exit) => exit.signal > 0 and validProcessOutput(exit.output)
     }
@@ -217,7 +222,7 @@ module quint_connect {
     | DriverFailed(DriverErrorDetail)
     | StatesDiffer({ detail: Mismatch, artifacts: Artifacts })
 
-  type CleanupNote = NoCleanupError | CleanupAlsoFailed(str)
+  type CleanupNote = NoCleanupError | CleanupAlsoFailed(str) | CleanupDeferred({ workspace: WorkspaceId, cause: str })
 
   type Outcome = Passed | Failed({ error: Failure, cleanup: CleanupNote })
 
@@ -225,6 +230,7 @@ module quint_connect {
     | Ready
     | AwaitingSpawn(Generation)
     | AwaitingGeneration(Generation)
+    | AwaitingExitConfirmation({ generation: Generation, problem: ProcessIoProblem })
     | AwaitingListing({ generation: Generation, entries: List[cli::GeneratedEntry] })
     | AwaitingValidation(TraceBatch)
     | AwaitingDriver(ValidatedTrace)
@@ -247,6 +253,8 @@ module quint_connect {
     | WorkspaceReserved(Generation)
     | ProcessStarted(Generation)
     | ProcessExitedSuccessfully(Generation)
+    | ProcessIoFailed({ generation: Generation, problem: ProcessIoProblem, exit: ExitKnowledge })
+    | ChildExitConfirmed(Generation)
     | GenerationCompleted({ generation: Generation, result: GenerationResult, basenames: TraceBasenames })
     | ValidationAttempted(TracePosition)
     | TraceValidated({ position: TracePosition, steps: List[TraceStep] })
@@ -259,6 +267,7 @@ module quint_connect {
     | ArtifactDirectoryTried({ root: str, directory: int, result: DirectoryAttempt })
     | SaveAttempted({ position: TracePosition, result: SaveResult })
     | CleanupAttempted({ workspace: WorkspaceId, result: StorageResult })
+    | WorkspaceCleanupDeferred({ workspace: WorkspaceId, cause: str })
     | FailureRecognized(Failure)
     | Returned(Outcome)
 
@@ -669,6 +678,61 @@ module quint_connect {
           changeCallWithFiles(id, onGeneration(calls.get(id), g, ProcessFailed(SpawnFailure(cause)), Map()),
             fs::recordTraceFiles(filesystem, g.workspace, output)),
         }
+      }
+      | _ => inapplicable
+    }
+
+  pure def processIoError(g: Generation, problem: ProcessIoProblem): Failure =
+    QuintFailed({ seed: g.seed, problem: ProcessIoFailure(problem) })
+
+  action recordAbortedWorkspace(id: CallId, g: Generation, state: CallState, partial: fs::TraceFiles): bool = {
+    val output = fs::AbortedFiles(partial)
+    all {
+      fs::canRecordTraceFiles(filesystem, g.workspace, output),
+      changeCallWithFiles(id, state, fs::recordTraceFiles(filesystem, g.workspace, output)),
+    }
+  }
+
+  action failProcessIo(id: CallId, problem: ProcessIoProblem, exit: ExitKnowledge): bool =
+    match calls.get(id).phase {
+      | AwaitingGeneration(g) => {
+        val current = calls.get(id)
+        val observed = recordEvent(current, current.phase, ProcessIoFailed({
+          generation: g, problem: problem, exit: exit,
+        }))
+        val error = processIoError(g, problem)
+        match exit {
+          | ExitConfirmed(partial) =>
+            recordAbortedWorkspace(id, g, stop(observed, GeneratedItf(g), error), partial)
+          | ExitUnconfirmed =>
+            changeCall(id, recordEvent(observed, AwaitingExitConfirmation({
+              generation: g, problem: problem,
+            }), FailureRecognized(error)))
+        }
+      }
+      | _ => inapplicable
+    }
+
+  action confirmChildExit(id: CallId, partial: fs::TraceFiles): bool =
+    match calls.get(id).phase {
+      | AwaitingExitConfirmation(ctx) => {
+        val current = calls.get(id)
+        val confirmed = recordEvent(current, current.phase, ChildExitConfirmed(ctx.generation))
+        val result = failed(processIoError(ctx.generation, ctx.problem))
+        recordAbortedWorkspace(id, ctx.generation, finish(confirmed, GeneratedItf(ctx.generation), result), partial)
+      }
+      | _ => inapplicable
+    }
+
+  action deferCleanup(id: CallId, cause: str, observedPartial: fs::TraceFiles): bool =
+    match calls.get(id).phase {
+      | AwaitingExitConfirmation(ctx) => {
+        val current = calls.get(id)
+        val pending = recordEvent(current, current.phase, WorkspaceCleanupDeferred({
+          workspace: ctx.generation.workspace, cause: cause,
+        }))
+        val result = Failed({ error: processIoError(ctx.generation, ctx.problem), cleanup: CleanupDeferred({ workspace: ctx.generation.workspace, cause: cause }) })
+        recordAbortedWorkspace(id, ctx.generation, returned(pending, result), observedPartial)
       }
       | _ => inapplicable
     }
@@ -1307,6 +1371,8 @@ module quint_connect {
       | ArtifactDirectoryTried(_) => true
       | SaveAttempted(_) => true
       | CleanupAttempted(_) => true
+      | ChildExitConfirmed(_) => true
+      | WorkspaceCleanupDeferred(_) => true
       | FailureRecognized(_) => true
       | Returned(_) => true
       | _ => false
@@ -1456,6 +1522,19 @@ module quint_connect {
         }
     }
 
+  pure def childExitUnconfirmed(history: List[Event], index: int, workspace: WorkspaceId): bool =
+    hasPrior(history, index, event =>
+      match event {
+        | ProcessIoFailed(failure) => failure.generation.workspace == workspace and failure.exit == ExitUnconfirmed
+        | _ => false
+      }
+    ) and not(hasPrior(history, index, event =>
+      match event {
+        | ChildExitConfirmed(g) => g.workspace == workspace
+        | _ => false
+      }
+    ))
+
   pure def resultMatchesCleanup(history: List[Event], result: Outcome): bool = {
     val reservations = history.indices().filter(index =>
       match history.nth(index) {
@@ -1469,7 +1548,26 @@ module quint_connect {
         | _ => false
       }
     )
-    if (reservations.size() == 1 and cleanups.size() == 1) {
+    val deferred = history.indices().filter(index =>
+      match history.nth(index) {
+        | WorkspaceCleanupDeferred(_) => true
+        | _ => false
+      }
+    )
+    if (deferred.size() == 1) {
+      val notedAt = deferred.getOnlyElement()
+      reservations.size() == 1 and cleanups.size() == 0 and notedAt == history.length() - 2 and
+        (match history.nth(notedAt) {
+          | WorkspaceCleanupDeferred(note) =>
+            match result {
+              | Failed(failure) => failure.cleanup == CleanupDeferred(note) and
+                childExitUnconfirmed(history, notedAt, note.workspace)
+              | _ => false
+            }
+          | _ => false
+        })
+    } else if (deferred.size() != 0) false
+    else if (reservations.size() == 1 and cleanups.size() == 1) {
       val reservedAt = reservations.getOnlyElement()
       val cleanedAt = cleanups.getOnlyElement()
       val alreadyFailed = hasPrior(history, cleanedAt, isFailure)
@@ -1582,7 +1680,16 @@ module quint_connect {
                 | _ => previousIs(history, index, event =>
                     event == ProcessExitedSuccessfully(completed.generation))
               })
-          | CleanupAttempted(cleaned) => ownsWorkspace(history, cleaned.workspace)
+          | ProcessIoFailed(failure) =>
+            previousIs(history, index, event => event == ProcessStarted(failure.generation))
+          | ChildExitConfirmed(g) => childExitUnconfirmed(history, index, g.workspace)
+          | CleanupAttempted(cleaned) =>
+            ownsWorkspace(history, cleaned.workspace) and not(childExitUnconfirmed(history, index, cleaned.workspace))
+          | WorkspaceCleanupDeferred(note) =>
+            if (ownsWorkspace(history, note.workspace))
+              childExitUnconfirmed(history, index, note.workspace) and
+                filesystem.workspaces.get(note.workspace).status == fs::WorkspaceActive
+            else false
           | _ => true
         }
       )
@@ -1649,7 +1756,8 @@ module quint_connect {
     match state.phase {
       | Ready => List(8, 0, 0, 0, 0)
       | AwaitingSpawn(_) => List(7, 0, 0, 0, 0)
-      | AwaitingGeneration(_) => List(6, 0, 0, 0, 0)
+      | AwaitingGeneration(_) => List(6, 1, 0, 0, 0)
+      | AwaitingExitConfirmation(_) => List(6, 0, 0, 0, 0)
       | AwaitingListing(_) => List(5, 0, 0, 0, 0)
       | AwaitingValidation(batch) => List(4, pendingTraces(batch), 3, 0, 0)
       | AwaitingDriver(validated) => List(4, pendingTraces(validated.batch), 2, 0, 0)
@@ -1693,6 +1801,8 @@ module quint_connect {
       | AwaitingSpawn(_) => true
       | AwaitingGeneration(g) =>
         fs::canRecordTraceFiles(filesystem, g.workspace, fs::AbortedFiles(Map()))
+      | AwaitingExitConfirmation(ctx) =>
+        fs::canRecordTraceFiles(filesystem, ctx.generation.workspace, fs::AbortedFiles(Map()))
       | AwaitingListing(_) => true // The listing may succeed or fail.
       | AwaitingValidation(batch) =>
         match batch.source {
@@ -1884,6 +1994,10 @@ module quint_connect {
         )),
         completeProcessFailure(id, NonzeroExit({ code: 1, output: noProcessOutput }), Map(0 -> List(123))),
         completeProcessFailure(id, SignalExit({ signal: 15, output: noProcessOutput }), Map(0 -> List(123))),
+        failProcessIo(id, { stage: WaitForExit, cause: "wait failed" }, ExitUnconfirmed),
+        failProcessIo(id, { stage: CollectOutput, cause: "output read failed" }, ExitConfirmed(Map(0 -> List(123)))),
+        confirmChildExit(id, Map(0 -> List(123))),
+        deferCleanup(id, "exit remains unconfirmed", Map(0 -> List(123))),
         listGeneratedOutput(id, ListingSucceeded),
         listGeneratedOutput(id, ListingFailed("output listing failed")),
         readGeneratedInput(id, ReadSucceeded),
@@ -2064,6 +2178,20 @@ module quint_connect_sample {
   observation processWasSignaled = processFailureObserved(problem =>
     match problem {
       | SignalExit(_) => true
+      | _ => false
+    }
+  )
+
+  observation processIoFailed = anyCallHas(event =>
+    match event {
+      | ProcessIoFailed(_) => true
+      | _ => false
+    }
+  )
+
+  observation workspaceCleanupDeferred = anyCallHas(event =>
+    match event {
+      | WorkspaceCleanupDeferred(_) => true
       | _ => false
     }
   )
