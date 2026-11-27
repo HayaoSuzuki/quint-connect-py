@@ -2,7 +2,7 @@
 
 Run Quint model traces against Python code.
 
-- [User documentation](docs/user/index.md) 
+- [User documentation](docs/user/index.md)
 - [Developer documentation](docs/development/index.md)
 
 ## License
