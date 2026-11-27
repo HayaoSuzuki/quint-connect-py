@@ -19,6 +19,15 @@ module quint_filesystem {
   // A private directory is one cleanup unit, including any contents.
   type WorkspaceNonFile = WorkspaceDirectory | WorkspaceSpecial
 
+  type WorkspaceContents = {
+    regular: TraceFiles,
+    aliases: int -> FilePath,
+    nonFiles: int -> WorkspaceNonFile,
+  }
+
+  pure def regularWorkspaceContents(files: TraceFiles): WorkspaceContents =
+    { regular: files, aliases: Map(), nonFiles: Map() }
+
   type ResolutionFailure = MissingFile | AliasCycle
   type FileResolution = ResolvedFile(FilePath) | UnresolvedFile(ResolutionFailure)
   type FileRead = FileBytes(Bytes) | FileUnavailable(ResolutionFailure)
@@ -176,6 +185,31 @@ module quint_filesystem {
       ),
       workspaces: fs.workspaces.put(workspace, { ...ws, output: output }),
     }
+  }
+
+  pure def canRecordWorkspaceContents(
+    fs: FileSystem, workspace: int, owner: int, output: GenerationFiles, contents: WorkspaceContents
+  ): bool = {
+    val regular = contents.regular.keys()
+    val aliases = contents.aliases.keys()
+    val nonFiles = contents.nonFiles.keys()
+    and {
+      writtenFiles(output) == contents.regular,
+      canRecordTraceFiles(fs, workspace, output),
+      regular.intersect(aliases.union(nonFiles)).size() == 0,
+      aliases.intersect(nonFiles).size() == 0,
+      aliases.union(nonFiles).forall(trace => canCreateWorkingEntry(fs, workspace, owner, trace)),
+    }
+  }
+
+  pure def recordWorkspaceContents(
+    fs: FileSystem, workspace: int, output: GenerationFiles, contents: WorkspaceContents
+  ): FileSystem = {
+    val regular = recordTraceFiles(fs, workspace, output)
+    val withAliases = contents.aliases.keys().fold(regular, (snapshot, trace) =>
+      createWorkingAlias(snapshot, workspace, trace, contents.aliases.get(trace)))
+    contents.nonFiles.keys().fold(withAliases, (snapshot, trace) =>
+      createWorkingNonFile(snapshot, workspace, trace, contents.nonFiles.get(trace)))
   }
 
   // Aborted generation may leave work files, but callers never read them.

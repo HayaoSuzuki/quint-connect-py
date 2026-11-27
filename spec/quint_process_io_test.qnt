@@ -13,6 +13,11 @@ module quint_process_io_test {
   pure val outputError: Failure = QuintFailed({ seed: sampleSeed, problem: ProcessIoFailure(outputProblem) })
   pure val waitError: Failure = QuintFailed({ seed: sampleSeed, problem: ProcessIoFailure(waitProblem) })
   pure val partialOutput: fs::TraceFiles = Map(2 -> originalBytes)
+  pure val partialContents: fs::WorkspaceContents = {
+    regular: partialOutput,
+    aliases: Map(3 -> fs::SavedFile("external.itf.json")),
+    nonFiles: Map(4 -> fs::WorkspaceDirectory, 5 -> fs::WorkspaceSpecial),
+  }
 
   def reachedReplayOrSave: bool =
     hasEvent(calls.get(1).history, event =>
@@ -43,6 +48,7 @@ module quint_process_io_test {
   val hasUnreadablePartialOutput: bool = and {
     filesystem.workspaces.get(7).output == fs::AbortedFiles(partialOutput),
     fs::workingFiles(filesystem, 7) == Set(2),
+    fs::workingEntries(filesystem, 7) == Set(2, 3, 4, 5),
     filesystem.files.get(fs::workingPath(7, 2)) == originalBytes,
     not(fs::canReadGeneratedFile(filesystem, 7, 2)),
   }
@@ -55,7 +61,7 @@ module quint_process_io_test {
   run outputCollectionFailureWithConfirmedExitCleansPartialOutputTest =
     init
       .then(startChild)
-      .then(failProcessIo(1, outputProblem, ExitConfirmed(partialOutput)))
+      .then(failProcessIo(1, outputProblem, ExitConfirmed(partialContents)))
       .expect(calls.get(1).phase == AwaitingCleanup({ generation: generation, result: failed(outputError) }) and
         hasUnreadablePartialOutput and not(reachedReplayOrSave) and safety)
       .then(cleanWorkspace(1, StorageSucceeded))
@@ -68,25 +74,38 @@ module quint_process_io_test {
       .then(failWaitWithoutExitConfirmation)
       .expect(awaitingExitConfirmation and not(attemptedCleanup) and
         filesystem.workspaces.get(7).status == fs::WorkspaceActive and safety)
-      .then(confirmChildExit(1, partialOutput))
+      .then(confirmChildExit(1, partialContents))
       .expect(calls.get(1).phase == AwaitingCleanup({ generation: generation, result: failed(waitError) }) and
         hasUnreadablePartialOutput and not(attemptedCleanup) and safety)
-      .then(cleanWorkspaceWithRemoval(1, StorageFailed("cleanup interrupted"), fs::RemoveInterrupted(Set(2))))
+      .then(cleanWorkspaceWithRemoval(1, StorageFailed("cleanup interrupted"), fs::RemoveInterrupted(Set(2, 5))))
       .expect(calls.get(1).phase == Finished(Failed({
         error: waitError, cleanup: CleanupAlsoFailed("cleanup interrupted"),
-      })) and attemptedCleanup and fs::workingFiles(filesystem, 7) == Set(2) and not(reachedReplayOrSave) and safety)
+      })) and attemptedCleanup and fs::workingEntries(filesystem, 7) == Set(2, 5) and not(reachedReplayOrSave) and safety)
 
   run deferredCleanupRetainsActiveWorkspaceAndPartialOutputTest =
     init
       .then(startChild)
       .then(failWaitWithoutExitConfirmation)
-      .then(deferCleanup(1, "reap could not be confirmed", partialOutput))
+      .then(deferCleanup(1, "reap could not be confirmed", partialContents))
       .expect(calls.get(1).phase == Finished(Failed({
         error: waitError, cleanup: CleanupDeferred({ workspace: 7, cause: "reap could not be confirmed" }),
       })) and filesystem.workspaces.get(7).status == fs::WorkspaceActive and
         filesystem.workspaces.get(7).evidence == fs::NoEvidence and
         filesystem.artifactDirectories.keys() == Set() and
         hasUnreadablePartialOutput and not(attemptedCleanup) and not(reachedReplayOrSave) and safety)
+
+  run nonzeroExitLeavesAllEntryKindsForCleanupTest = {
+    val problem = NonzeroExit({ code: 2, output: noProcessOutput })
+    val error = QuintFailed({ seed: sampleSeed, problem: problem })
+    init
+      .then(startChild)
+      .then(completeProcessFailureWithContents(1, problem, partialContents))
+      .expect(calls.get(1).phase == AwaitingCleanup({ generation: generation, result: failed(error) }) and
+        hasUnreadablePartialOutput and not(reachedReplayOrSave) and safety)
+      .then(cleanWorkspace(1, StorageSucceeded))
+      .expect(calls.get(1).phase == Finished(failed(error)) and
+        fs::workingEntries(filesystem, 7).size() == 0 and safety)
+  }
 
   run cleanupIsDisabledUntilChildExitIsConfirmedTest =
     init

@@ -90,7 +90,7 @@ module quint_connect {
   type ProcessOutput = { stdout: fs::Bytes, stderr: fs::Bytes }
   type ProcessIoStage = WaitForExit | CollectOutput
   type ProcessIoProblem = { stage: ProcessIoStage, cause: str }
-  type ExitKnowledge = ExitConfirmed(fs::TraceFiles) | ExitUnconfirmed
+  type ExitKnowledge = ExitConfirmed(fs::WorkspaceContents) | ExitUnconfirmed
   type ProcessProblem =
     | SpawnFailure(str)
     | NonzeroExit({ code: int, output: ProcessOutput })
@@ -752,13 +752,17 @@ module quint_connect {
   pure def processIoError(g: Generation, problem: ProcessIoProblem): Failure =
     QuintFailed({ seed: g.seed, problem: ProcessIoFailure(problem) })
 
-  action recordAbortedWorkspace(id: CallId, g: Generation, state: CallState, partial: fs::TraceFiles): bool = {
-    val output = fs::AbortedFiles(partial)
-    all {
-      fs::canRecordTraceFiles(filesystem, g.workspace, output),
-      changeCallWithFiles(id, state, fs::recordTraceFiles(filesystem, g.workspace, output)),
-    }
+  action recordProcessContents(
+    id: CallId, g: Generation, state: CallState, output: fs::GenerationFiles, contents: fs::WorkspaceContents
+  ): bool = all {
+    fs::canRecordWorkspaceContents(filesystem, g.workspace, id, output, contents),
+    changeCallWithFiles(id, state, fs::recordWorkspaceContents(filesystem, g.workspace, output, contents)),
   }
+
+  action recordAbortedWorkspace(
+    id: CallId, g: Generation, state: CallState, partial: fs::WorkspaceContents
+  ): bool =
+    recordProcessContents(id, g, state, fs::AbortedFiles(partial.regular), partial)
 
   action failProcessIo(id: CallId, problem: ProcessIoProblem, exit: ExitKnowledge): bool =
     match calls.get(id).phase {
@@ -780,7 +784,7 @@ module quint_connect {
       | _ => inapplicable
     }
 
-  action confirmChildExit(id: CallId, partial: fs::TraceFiles): bool =
+  action confirmChildExit(id: CallId, partial: fs::WorkspaceContents): bool =
     match calls.get(id).phase {
       | AwaitingExitConfirmation(ctx) => {
         val current = calls.get(id)
@@ -791,7 +795,7 @@ module quint_connect {
       | _ => inapplicable
     }
 
-  action deferCleanup(id: CallId, cause: str, observedPartial: fs::TraceFiles): bool =
+  action deferCleanup(id: CallId, cause: str, observedPartial: fs::WorkspaceContents): bool =
     match calls.get(id).phase {
       | AwaitingExitConfirmation(ctx) => {
         val current = calls.get(id)
@@ -841,8 +845,19 @@ module quint_connect {
       | _ => inapplicable
     }
 
+  action completeProcessFailureWithContents(
+    id: CallId, problem: ProcessProblem, partial: fs::WorkspaceContents
+  ): bool =
+    match calls.get(id).phase {
+      | AwaitingGeneration(g) => all {
+          isExitProblem(problem),
+          recordAbortedWorkspace(id, g, onGeneration(calls.get(id), g, ProcessFailed(problem), Map()), partial),
+        }
+      | _ => inapplicable
+    }
+
   action completeProcessFailure(id: CallId, problem: ProcessProblem, partialOutput: fs::TraceFiles): bool =
-    completeGenerationWithFiles(id, ProcessFailed(problem), fs::AbortedFiles(partialOutput))
+    completeProcessFailureWithContents(id, problem, fs::regularWorkspaceContents(partialOutput))
 
   // Non-regular entries appear in the listing but do not supply ITF bytes.
   type EntryContents = RegularContents(fs::Bytes) | DirectoryEntry | AliasEntry(fs::FilePath) | OtherEntry
@@ -900,23 +915,14 @@ module quint_connect {
   action completeProcessWithEntries(id: CallId, entries: List[ProducedEntry]): bool =
     match calls.get(id).phase {
       | AwaitingGeneration(g) => {
-        val output = fs::GeneratedFiles(generatedBytes(entries))
-        val aliases = generatedAliases(entries)
-        val nonFiles = generatedNonFiles(entries)
+        val contents: fs::WorkspaceContents = {
+          regular: generatedBytes(entries), aliases: generatedAliases(entries), nonFiles: generatedNonFiles(entries),
+        }
+        val state = recordEvent(calls.get(id),
+          AwaitingListing({ generation: g, entries: directoryEntries(entries) }), ProcessExitedSuccessfully(g))
         all {
           distinctProducedEntries(entries),
-          fs::canRecordTraceFiles(filesystem, g.workspace, output),
-          aliases.keys().forall(trace => fs::canCreateWorkingAlias(filesystem, g.workspace, id, trace)),
-          nonFiles.keys().forall(trace => fs::canCreateWorkingNonFile(filesystem, g.workspace, id, trace)),
-          {
-            val regular = fs::recordTraceFiles(filesystem, g.workspace, output)
-            val withAliases = aliases.keys().fold(regular, (snapshot, trace) =>
-              fs::createWorkingAlias(snapshot, g.workspace, trace, aliases.get(trace)))
-            val withNonFiles = nonFiles.keys().fold(withAliases, (snapshot, trace) =>
-              fs::createWorkingNonFile(snapshot, g.workspace, trace, nonFiles.get(trace)))
-            changeCallWithFiles(id, recordEvent(calls.get(id),
-              AwaitingListing({ generation: g, entries: directoryEntries(entries) }), ProcessExitedSuccessfully(g)), withNonFiles)
-          },
+          recordProcessContents(id, g, state, fs::GeneratedFiles(contents.regular), contents),
         }
       }
       | _ => inapplicable
@@ -2138,9 +2144,9 @@ module quint_connect {
         completeProcessFailure(id, NonzeroExit({ code: 1, output: noProcessOutput }), Map(0 -> List(123))),
         completeProcessFailure(id, SignalExit({ signal: 15, output: noProcessOutput }), Map(0 -> List(123))),
         failProcessIo(id, { stage: WaitForExit, cause: "wait failed" }, ExitUnconfirmed),
-        failProcessIo(id, { stage: CollectOutput, cause: "output read failed" }, ExitConfirmed(Map(0 -> List(123)))),
-        confirmChildExit(id, Map(0 -> List(123))),
-        deferCleanup(id, "exit remains unconfirmed", Map(0 -> List(123))),
+        failProcessIo(id, { stage: CollectOutput, cause: "output read failed" }, ExitConfirmed(fs::regularWorkspaceContents(Map(0 -> List(123))))),
+        confirmChildExit(id, fs::regularWorkspaceContents(Map(0 -> List(123)))),
+        deferCleanup(id, "exit remains unconfirmed", fs::regularWorkspaceContents(Map(0 -> List(123)))),
         listGeneratedOutput(id, ListingSucceeded),
         listGeneratedOutput(id, ListingFailed("output listing failed")),
         readGeneratedInput(id, ReadSucceeded),

@@ -126,7 +126,7 @@ module quint_conformance {
       | ChildFailed(failure) =>
         completeProcessFailure(id, failure.problem, partialBytes(failure.partialOutput))
       | ChildIoFailed(failure) => failProcessIo(id, failure.problem, failure.exit)
-      | ChildExitWasConfirmed(files) => confirmChildExit(id, partialBytes(files))
+      | ChildExitWasConfirmed(files) => confirmChildExit(id, fs::regularWorkspaceContents(partialBytes(files)))
       | DirectoryListing(result) => listGeneratedOutput(id, result)
       | GeneratedRead(result) => readGeneratedInput(id, result)
       | DriverFactory(result) => createDriver(id, result)
@@ -140,7 +140,7 @@ module quint_conformance {
       | EvidenceCopyFinished(result) => completeArtifactCopy(id, result)
       | WorkspaceCleanup(cleanup) => cleanWorkspaceWithRemoval(id, cleanup.result, cleanup.removal)
       | WorkspaceCleanupWasDeferred(cleanup) =>
-        deferCleanup(id, cleanup.cause, partialBytes(cleanup.partialOutput))
+        deferCleanup(id, cleanup.cause, fs::regularWorkspaceContents(partialBytes(cleanup.partialOutput)))
     },
     schedule' = schedule.append({ callId: id, input: Respond(response) }),
   }
