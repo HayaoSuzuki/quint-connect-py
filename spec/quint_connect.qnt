@@ -193,7 +193,11 @@ module quint_connect {
   type EvidenceFailure = MismatchEvidence(Mismatch) | DriverEvidence(DriverErrorDetail)
 
   type ArtifactDirectoryProblem = { root: str, directory: int, cause: str }
-  type SaveResult = ArtifactSaved(fs::FilePath) | ArtifactDirectoryFailed(ArtifactDirectoryProblem) | ArtifactSaveFailed(str)
+  type SaveResult =
+    | ArtifactSaved(fs::FilePath)
+    | ArtifactPreparationFailed(str)
+    | ArtifactDirectoryFailed(ArtifactDirectoryProblem)
+    | ArtifactSaveFailed(str)
   type ArtifactPreparation = ArtifactUnplanned | ArtifactCandidates(List[int]) | ArtifactReadyToCopy
   type DirectoryAttempt = DirectoryReserved | DirectoryCollision | DirectoryRejected(str)
 
@@ -1112,6 +1116,16 @@ module quint_connect {
       | _ => inapplicable
     }
 
+  action failArtifactPreparation(id: CallId, cause: str): bool =
+    match calls.get(id).phase {
+      | AwaitingArtifact(ctx) => all {
+          ctx.preparation == ArtifactUnplanned,
+          changeCall(id, onArtifact(calls.get(id), ctx.generation, ctx.position, ctx.detail,
+            ArtifactPreparationFailed(cause))),
+        }
+      | _ => inapplicable
+    }
+
   action tryArtifactDirectory(id: CallId, result: StorageResult): bool =
     match calls.get(id).phase {
       | AwaitingArtifact(ctx) =>
@@ -1884,6 +1898,8 @@ module quint_connect {
                       path == fs::evidencePath(storage.root, directory, trace) and filesystem.files.keys().contains(path)
                   | NoArtifactDirectory => false
                 }
+              | ArtifactPreparationFailed(_) =>
+                storage.evidence == fs::NoEvidence and storage.artifactDirectory == fs::NoArtifactDirectory
               | ArtifactDirectoryFailed(_) =>
                 storage.evidence == fs::NoEvidence and storage.artifactDirectory == fs::NoArtifactDirectory
               | ArtifactSaveFailed(_) =>
@@ -2188,6 +2204,7 @@ module quint_connect {
         observeState(id, Observed(observed)),
         observeState(id, ObservationFailed("observation failed")),
         planArtifactDirectories(id, List(42, 100 + id)),
+        failArtifactPreparation(id, "artifact root unavailable"),
         tryArtifactDirectory(id, StorageSucceeded),
         tryArtifactDirectory(id, StorageFailed("artifact directory unavailable")),
         beginArtifactCopy(id),

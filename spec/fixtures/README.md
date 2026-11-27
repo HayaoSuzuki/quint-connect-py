@@ -16,7 +16,7 @@ python3 tools/export_quint_fixtures.py
 python3 tools/export_quint_fixtures.py --check
 ```
 
-Run `cargo test --lib conformance` to check the 16 cases against the Rust
+Run `cargo test --lib conformance` to check the 17 cases against the Rust
 implementation. Each test reads one case and supplies its responses to the
 production runner. The tests compare the generation and replay event histories,
 diagnostics, saved files, and remaining workspace files with the fixture JSON.
@@ -59,6 +59,10 @@ List `events` in the order they occur for the call. They include command
 preparation, process handling, file reads, driver calls, artifact reservation
 and saving, and cleanup. Use `Passed` or `Failed` for the final `outcome`.
 A failure includes the diagnostic and any cleanup note.
+
+In `artifactPreparationFailure`, the artifact root cannot be prepared. The
+original mismatch retains its seed and records the preparation error. The
+runner skips candidate reservation and cleans the workspace.
 
 In `overlappingArtifactReservation`, two calls use the same seed and filename
 and compete for the first candidate directory under the same artifact root.

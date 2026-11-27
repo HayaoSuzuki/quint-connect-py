@@ -146,7 +146,10 @@ impl GeneratedRun {
                 "ArtifactDirectoryFailed",
                 json!({"root": self.root, "directory": directory_id(directory), "cause": cause.to_string()}),
             ),
-            Err(ArtifactError::Save(cause) | ArtifactError::Prepare(cause)) => {
+            Err(ArtifactError::Prepare(cause)) => {
+                tagged("ArtifactPreparationFailed", json!(cause.to_string()))
+            }
+            Err(ArtifactError::Save(cause)) => {
                 tagged("ArtifactSaveFailed", json!(cause.to_string()))
             }
         }
@@ -325,9 +328,12 @@ impl RunEnvironment for GeneratedRun {
         }
     }
 
-    fn artifact_candidates(&mut self, root: &Path) -> io::Result<Vec<PathBuf>> {
+    fn prepare_artifact_candidates(&mut self, root: &Path) -> io::Result<Vec<PathBuf>> {
         assert_eq!(root.file_name().unwrap(), OsStr::new(&self.root));
-        let response = self.response(&["ArtifactCandidateList"]);
+        let response = self.response(&["ArtifactCandidateList", "ArtifactCandidatesUnavailable"]);
+        if response["tag"] == "ArtifactCandidatesUnavailable" {
+            return Err(cause(&response["value"]));
+        }
         Ok(response["value"]
             .as_array()
             .unwrap()
@@ -761,6 +767,11 @@ fn check(name: &str) {
         }
     }
     assert_eq!(actual, *expected, "{name}");
+}
+
+#[test]
+fn artifact_preparation_failure() {
+    check("artifactPreparationFailure");
 }
 
 #[test]

@@ -50,8 +50,9 @@ def quint_executable() -> str:
 
 
 @pytest.mark.parametrize("backend", [Backend.RUST, Backend.TYPESCRIPT])
-def test_counter_matches_simulation(backend: Backend) -> None:
+def test_counter_matches_simulation(backend: Backend, tmp_path: Path) -> None:
     config = Simulation(MODEL, max_steps=2)
+    artifact_dir = tmp_path / "output" / "artifacts"
 
     result = run(
         config,
@@ -59,11 +60,13 @@ def test_counter_matches_simulation(backend: Backend) -> None:
         quint=quint_executable(),
         seed=42,
         backend=backend,
+        artifact_dir=artifact_dir,
         action_path=("op",),
         state_path=("count",),
     )
 
     assert result is None
+    assert not artifact_dir.exists()
 
 
 @pytest.mark.parametrize("backend", [Backend.RUST, Backend.TYPESCRIPT])
@@ -90,6 +93,7 @@ def test_generated_driver_failure_saves_a_replayable_trace(
     tmp_path: Path, stage: DriverStage
 ) -> None:
     failure = RuntimeError(stage.value)
+    artifact_dir = tmp_path / "output" / "artifacts"
 
     class FailingDriver(Counter):
         @override
@@ -115,7 +119,7 @@ def test_generated_driver_failure_saves_a_replayable_trace(
             factory,
             quint=quint_executable(),
             seed=42,
-            artifact_dir=tmp_path,
+            artifact_dir=artifact_dir,
             action_path=("op",),
             state_path=("count",),
         )
@@ -124,6 +128,7 @@ def test_generated_driver_failure_saves_a_replayable_trace(
     assert error.seed == 42
     assert error.stage is stage
     assert error.__cause__ is failure
+    assert error.artifact_error is None
     assert error.artifact_path is not None
     assert error.artifact_path.is_file()
     assert not error.trace_path.exists()
@@ -162,7 +167,7 @@ def test_generated_context_exit_failure_saves_the_trace(tmp_path: Path) -> None:
 def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
     config = Simulation(MODEL, max_steps=2)
     shared = os.environ.get("QUINT_TEST_SHARED_ARTIFACT_DIR")
-    artifact_dir = tmp_path if shared is None else Path(shared)
+    artifact_dir = tmp_path / "output" / "artifacts" if shared is None else Path(shared)
 
     class BrokenCounter:
         def step(self, _action: Action, /) -> None:
@@ -183,8 +188,10 @@ def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
         )
 
     artifact = generated.value.artifact_path
+    assert generated.value.artifact_error is None
     assert artifact is not None
     assert artifact.is_file()
+    assert artifact.is_relative_to(artifact_dir)
     assert not generated.value.trace_path.exists()
     assert generated.value.seed == 42
     with pytest.raises(StateMismatchError) as saved:
@@ -194,6 +201,43 @@ def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
         generated.value.action,
         generated.value.expected,
     )
+
+
+@pytest.mark.parametrize("error_type", [StateMismatchError, DriverError])
+def test_artifact_root_failure_keeps_the_replay_error(
+    tmp_path: Path, error_type: type[StateMismatchError | DriverError]
+) -> None:
+    occupied = tmp_path / "output"
+    occupied.write_text("existing file", encoding="utf-8")
+    failure = RuntimeError("driver failed")
+
+    class FailingCounter(Counter):
+        @override
+        def observe(self) -> int:
+            if error_type is DriverError:
+                raise failure
+            return -1
+
+    with pytest.raises(error_type) as caught:
+        run(
+            Simulation(MODEL, max_steps=2),
+            FailingCounter,
+            quint=quint_executable(),
+            seed=42,
+            artifact_dir=occupied / "artifacts",
+            action_path=("op",),
+            state_path=("count",),
+        )
+
+    error = caught.value
+    assert error.seed == 42
+    assert error.artifact_path is None
+    assert error.artifact_candidate is None
+    assert isinstance(error.artifact_error, OSError)
+    assert not error.trace_path.exists()
+    assert occupied.read_text(encoding="utf-8") == "existing file"
+    if isinstance(error, DriverError):
+        assert error.__cause__ is failure
 
 
 class TicTacToe:
