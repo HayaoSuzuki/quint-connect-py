@@ -7,6 +7,7 @@ from os import PathLike
 from typing import TYPE_CHECKING, Protocol, Required, TypedDict, Unpack, cast, overload
 
 from . import _native
+from ._context import WithContext
 from ._diagnostics import detail_logging_enabled, logging_enabled
 from ._enums import Backend, DriverStage, QuintStage, WorkspaceStage
 from ._native import (
@@ -217,7 +218,7 @@ def _context_factory(
     if factory is not None and context is None:
         return lambda: nullcontext(factory())
     if context is not None and factory is None:
-        return context
+        return lambda: WithContext(context)
     message = "supply exactly one of driver_factory and driver_context"
     raise TypeError(message)
 

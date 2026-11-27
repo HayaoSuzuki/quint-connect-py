@@ -46,8 +46,9 @@ def driver_context():
 replay(["first.itf.json", "second.itf.json"], driver_context=driver_context)
 ```
 
-Each context is entered after its trace is validated and exited before the
-next trace starts. Supply either the driver factory or `driver_context`.
+Quint Connect opens the context using Python's `with` protocol after validating
+the trace, and closes it before the next trace starts. Supply either the driver
+factory or `driver_context`.
 On failure, the context receives the original driver exception or a
 `StateMismatchError`. Quint Connect raises that same `StateMismatchError`
 instance to the caller, including any notes added during exit. Diagnostics

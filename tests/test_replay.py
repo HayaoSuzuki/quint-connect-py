@@ -271,6 +271,62 @@ def test_context_exits_before_the_next_trace(tmp_path: Path) -> None:
     assert events == ["enter", "exit", "enter", "exit"]
 
 
+def test_driver_context_uses_the_with_protocol(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    events: list[str] = []
+
+    class ShadowedContext:
+        def __init__(self) -> None:
+            self.__dict__["__enter__"] = lambda: pytest.fail("instance __enter__ ran")
+            self.__dict__["__exit__"] = lambda *_: pytest.fail("instance __exit__ ran")
+
+        def __enter__(self) -> ConstantDriver:
+            events.append("enter")
+            return ConstantDriver(True)
+
+        def __exit__(
+            self,
+            _exc_type: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: TracebackType | None,
+            /,
+        ) -> None:
+            events.append("exit")
+
+    replay(path, driver_context=ShadowedContext, state_path=("state",))
+
+    assert events == ["enter", "exit"]
+
+
+@pytest.mark.parametrize("stage", [DriverStage.FACTORY, DriverStage.EXIT])
+def test_driver_context_preserves_stop_iteration(
+    tmp_path: Path, stage: DriverStage
+) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    failure = StopIteration("context failed")
+
+    class FailingContext:
+        def __enter__(self) -> ConstantDriver:
+            if stage is DriverStage.FACTORY:
+                raise failure
+            return ConstantDriver(True)
+
+        def __exit__(
+            self,
+            _exc_type: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: TracebackType | None,
+            /,
+        ) -> None:
+            raise failure
+
+    with pytest.raises(DriverError) as caught:
+        replay(path, driver_context=FailingContext, state_path=("state",))
+
+    assert caught.value.stage is stage
+    assert caught.value.__cause__ is failure
+
+
 def test_context_receives_driver_failure(tmp_path: Path) -> None:
     path = write_trace(tmp_path / "trace.itf.json", [state(True)])
     failure = RuntimeError("driver failed")
