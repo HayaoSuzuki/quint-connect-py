@@ -1,83 +1,103 @@
-# Rust 実装との照合データ
+# Rust runner conformance fixtures
 
-`runner-conformance.json` は、`../quint_conformance.qnt` のシナリオを実行して生成する。
-各シナリオは、呼び出しごとの要求と応答を一つの実行順序に並べてランナーに渡す。
-エクスポーターは実行時の ITF トレースから呼び出しごとの最終結果とイベント履歴、
-全呼び出しが完了した時点でのファイルの内容を抽出する。
-TypeScript と Rust の両評価器から得た JSON が一致した場合に、照合データを更新する。
+Generate `runner-conformance.json` by running the scenarios in
+[`quint_conformance.qnt`](../quint_conformance.qnt). Each scenario supplies a
+single ordered schedule of call requests and responses. The exporter reads the
+generated ITF traces to extract each call's outcome, its event history, and the
+file contents after all calls finish. It updates the fixture file if the
+TypeScript and Rust evaluators produce identical JSON.
 
-リポジトリのルートで次のコマンドを実行する。Python 3.10 以降と Quint 0.34.0 が必要になる。
-1 行目は JSON を生成し、2 行目は評価器間とリポジトリに保存した JSON との一致を検証する。
+From the repository root, run the following commands with Python 3.10 or later
+and Quint 0.34.0. The first command generates the JSON. The second checks that
+both evaluators agree with each other and with the checked-in file.
 
 ```sh
 python3 tools/export_quint_fixtures.py
 python3 tools/export_quint_fixtures.py --check
 ```
 
-Rust 実装の15ケースは `cargo test --lib conformance` で実行する。各関数は一つのケースを読み、その応答を本番のランナーに渡す。生成と再生の呼び出し履歴、例外の元となる診断、保存ファイルと残存ファイルを JSON と照合する。
+Run `cargo test --lib conformance` to check the 15 cases against the Rust
+implementation. Each test reads one case and supplies its responses to the
+production runner. The tests compare the generation and replay event histories,
+diagnostics, saved files, and remaining workspace files with the fixture JSON.
 
-## アダプターの入出力
+## Adapter inputs and outputs
 
-検証スクリプトはケースごとにアダプターを起動し、標準入力に JSON オブジェクトを一つ渡す。
-アダプターは `serde_json` などで入力を読み込み、実装の実行結果を JSON オブジェクト一つとして
-標準出力に書く。診断メッセージは標準エラーに書ける。アダプターの終了コードが非ゼロの場合、
-標準出力を JSON として読めない場合、または期待結果と差分がある場合は検証に失敗する。
+The verification script starts the adapter once per case and writes one JSON
+object to its standard input. The adapter can parse the input with
+`serde_json` and must write one JSON object containing its result to standard
+output. Send diagnostics to standard error. Verification fails if the adapter
+exits with a nonzero status, produces invalid JSON, or differs from the expected
+result.
 
 ```sh
 python3 tools/export_quint_fixtures.py --adapter ./path/to/runner-fixture-adapter
 ```
 
-入力のフィールドは `schema_version`（`2`）、`name`、`input_files`、`schedule` である。
-`schedule` は `call_id` と `input` を持つステップの配列で、アダプターは配列の順に進める。
-`input` の `Start` は指定の呼び出しを開始し、`Respond` はその呼び出しが待つ子プロセス、
-ファイル操作、ドライバーなどの応答を渡す。`Start` の後も、後続のステップで応答を渡せるように
-呼び出しを保持する。ケース内の呼び出しは保存先を含むファイルシステムを共有する。
+The input fields are `schema_version` (`2`), `name`, `input_files`, and
+`schedule`. Process the schedule array in order. Each entry has a `call_id`
+and an `input`. A `Start` input starts the call. A `Respond` input supplies
+the child process, file operation, or driver response the call is waiting for.
+Keep the call available after `Start` so later entries can supply responses.
+Calls in a case share the filesystem, including artifact destinations.
 
-`Start` の要求が `ReplayPaths` の場合、パスの並びは呼び出し元の指定順であり、
-同じパスの繰り返しや存在しないパスも含む。`RunQuint` の場合は CLI の要求、seed の入力値、
-成果物のルート、操作と状態の選択パスを指定する。
-保存済み ITF のバイト列は `input_files` にあり、生成された ITF のバイト列は
-子プロセスに対応する `Respond` に含まれる。
+For a `ReplayPaths` request, use the paths in the order given. The list may
+include repeated paths and paths that do not exist. A `RunQuint` request
+supplies the CLI settings, seed input, artifact root, and selection paths for
+the action and state. Read saved ITF bytes from `input_files` and generated ITF
+bytes from the child process response.
 
-アダプターの出力は、ケースの `expected` に含まれる次のフィールドで構成する。
+The adapter's output has the fields in the case's `expected` object.
 
-| フィールド | 内容 |
+| Field | Contents |
 | --- | --- |
-| `calls` | `call_id`、`events`、`outcome` を持つオブジェクトの配列。`call_id` の昇順に並ぶ。 |
-| `saved_files` | 全呼び出しが完了した時点で保存されている成果物のパスと全バイト列。 |
-| `remaining_workspace_files` | 全呼び出しが完了した時点で作業先に残っているファイルのパスと全バイト列。 |
+| `calls` | Objects containing `call_id`, `events`, and `outcome`, sorted by ascending `call_id`. |
+| `saved_files` | Paths and full byte contents of artifacts after all calls finish. |
+| `remaining_workspace_files` | Paths and full byte contents of files left in workspaces after all calls finish. |
 
-`events` は各呼び出しにおけるコマンドの準備、プロセスの処理、ファイルの読み込み、
-ドライバーの呼び出し、保存先の確保と保存、掃除などのイベントで、発生順に並ぶ。
-`outcome` は最終結果の `Passed` または `Failed` であり、失敗時は診断と掃除に関する付記事項を含む。
+List `events` in the order they occur for the call. They include command
+preparation, process handling, file reads, driver calls, artifact reservation
+and saving, and cleanup. Use `Passed` or `Failed` for the final `outcome`.
+A failure includes the diagnostic and any cleanup note.
 
-`overlappingArtifactReservation` では、二つの呼び出しが同じ seed とファイル名を使い、
-同じ成果物ルートで最初の保存先候補を取り合う。アダプターは確保済みの候補に対して衝突を報告し、
-空きがある候補に対して `ArtifactReservation` の結果を使う。
-先に保存した呼び出しが掃除を終えた後も、もう一方はコピーを続ける。
-照合では、各呼び出しの診断が参照する保存先と、各保存先にある元のバイト列を確認する。
+In `overlappingArtifactReservation`, two calls use the same seed and filename
+and compete for the first candidate directory under the same artifact root.
+Report a collision for a candidate that is already reserved. Use the
+`ArtifactReservation` response for an available candidate. One call
+continues copying after the other publishes its artifact and cleans up. The
+comparison checks which artifact path each diagnostic refers to and whether
+each artifact contains the original bytes.
 
-`waitFailureWithDeferredCleanup` では、`ChildIoFailed` の `ExitUnconfirmed` に続き、
-`WorkspaceCleanupWasDeferred` で終了を確認できなかった理由と作業先に残っているバイト列を渡す。
-照合では、待機失敗の診断、掃除を延期した作業先、その作業先に残したファイルを確認する。
+In `waitFailureWithDeferredCleanup`, a `ChildIoFailed` response carries
+`ExitUnconfirmed`. The following `WorkspaceCleanupWasDeferred` response
+supplies the reason the adapter could not confirm exit and the bytes that
+remain in the workspace. The comparison checks the wait failure diagnostic,
+the workspace whose cleanup was deferred, and the files left there.
 
-`outputCollectionFailureAfterExitConfirmation` でも子プロセスの終了が未確認となる。
-`ChildExitWasConfirmed` で終了の確認と作業先のバイト列を渡し、続く `WorkspaceCleanup` で
-掃除を完了する。掃除後も主診断には出力収集の失敗が残る。
+In `outputCollectionFailureAfterExitConfirmation`, the adapter also starts
+with exit unconfirmed. `ChildExitWasConfirmed` confirms exit and supplies the
+workspace bytes. The following `WorkspaceCleanup` completes cleanup. The
+output collection failure remains the primary diagnostic.
 
-`nestedArgumentMutationMismatch` では、`DriverApplyWithMutation` の `arguments` に
-ドライバーが書き換えた後の引数を指定する。アダプターはドライバーに渡された引数の中の
-値を書き換えてから `result` を返す。照合では、ドライバーが書き換えた値と、
-状態不一致の診断に残る操作呼び出し時の値を確認する。
+In `nestedArgumentMutationMismatch`, `DriverApplyWithMutation.arguments`
+contains the arguments after the driver's changes. Change the values inside
+the arguments passed to the driver before returning `result`. The comparison
+checks the changed values and the original arguments in the state mismatch
+diagnostic.
 
-Quint のバリアントは `tag` と `value` を持つオブジェクトで表し、値のない場合は
-`value` を `null` とする。パスには `SavedFile`、`WorkingFile`、`EvidenceFile` を使う。
-位置のインデックスは 0 から始まる。トレース ID は再生順のインデックスとは独立にファイルを識別する。
+Encode Quint variants as objects with `tag` and `value`. Use `null` for
+variants without a payload. Encode paths as `SavedFile`, `WorkingFile`, or
+`EvidenceFile`. Use zero-based position indices. Trace IDs identify files
+independently of replay order.
 
-ファイルの内容と子プロセスの出力は、0 から 255 の整数の配列で表す。操作名と選択パスの
-各要素は JSON 文字列である。操作の引数は引数名をキーとする JSON オブジェクトで表す。
-操作の各引数、期待状態、ドライバーが観測した状態は ITF の値表現に従う。整数は
-`#bigint` 内の十進文字列で表し、タプル、集合、マップには ITF のタグを使う。
-集合の要素とマップの項目は、オブジェクトのキーを整列して空白なしで
-JSON に変換したときの文字列順に並べる。照合時も集合とマップは同じ規則で整列する。
-ファイルの配列は同じ規則をパスに適用して並べる。イベントとバイト列は配列の順序も照合する。
+Represent file contents and child process output as arrays of integers from
+0 to 255. Use JSON strings for action names and each segment of a selection
+path. Represent action arguments as JSON objects keyed by argument name.
+Use ITF value encodings for argument values, expected states, and observed
+states. Encode integers as decimal strings under `#bigint` and use ITF tags
+for tuples, sets, and maps.
+
+To sort set elements or map entries, serialize each element or entry as
+compact JSON with sorted object keys and compare the resulting strings. The
+verification script uses the same ordering. Sort file arrays by comparing
+their paths in the same way. Event and byte arrays are compared in order.
