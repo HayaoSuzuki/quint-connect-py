@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use crate::cli::{Mode, Request};
+use crate::cli::{Backend, Mode, Request};
 use crate::itf::{Action, Selection};
 use crate::replay::{
     Driver, LocalEnvironment, TraceFile, TraceProblem, replay as replay_files, saved_files,
@@ -18,7 +18,7 @@ use self::value::Types;
 
 struct PythonDriver {
     object: Py<PyAny>,
-    exit: Option<Py<PyAny>>,
+    exit: Py<PyAny>,
     types: Arc<Types>,
 }
 
@@ -40,12 +40,9 @@ impl Driver for PythonDriver {
         })
     }
 
-    fn finish(&mut self, trace: &TraceFile, problem: Option<&TraceProblem<PyErr>>) -> PyResult<()> {
-        let Some(exit) = self.exit.take() else {
-            return Ok(());
-        };
+    fn finish(self, trace: &TraceFile, problem: Option<&TraceProblem<PyErr>>) -> PyResult<()> {
         Python::attach(|py| {
-            let exit = exit.bind(py);
+            let exit = self.exit.bind(py);
             match problem {
                 None => exit.call1((py.None(), py.None(), py.None()))?,
                 Some(problem) => {
@@ -68,23 +65,17 @@ impl Driver for PythonDriver {
     }
 }
 
-type DriverSetup = (Py<PyAny>, bool);
-
 fn factory(
-    (factory, managed): DriverSetup,
+    context_factory: Py<PyAny>,
     types: Arc<Types>,
 ) -> impl FnMut() -> PyResult<PythonDriver> + Send {
     move || {
         Python::attach(|py| {
-            let product = factory.bind(py).call0()?;
-            let (object, exit) = if managed {
-                let exit = product.getattr("__exit__")?.unbind();
-                (product.call_method0("__enter__")?, Some(exit))
-            } else {
-                (product, None)
-            };
+            let context = context_factory.bind(py).call0()?;
+            let exit = context.getattr("__exit__")?.unbind();
+            let object = context.call_method0("__enter__")?.unbind();
             Ok(PythonDriver {
-                object: object.unbind(),
+                object,
                 exit,
                 types: Arc::clone(&types),
             })
@@ -109,11 +100,11 @@ fn selection((action_path, state_path): SelectionPaths) -> Selection {
 fn replay(
     py: Python<'_>,
     paths: Vec<PathBuf>,
-    driver_setup: DriverSetup,
+    context_factory: Py<PyAny>,
     paths_selection: SelectionPaths,
 ) -> PyResult<()> {
     let types = Arc::new(Types::load(py)?);
-    let mut environment = LocalEnvironment(factory(driver_setup, Arc::clone(&types)));
+    let mut environment = LocalEnvironment(factory(context_factory, Arc::clone(&types)));
     let caller = std::env::current_dir()?;
     let files = saved_files(&paths, &caller);
     let selection = selection(paths_selection);
@@ -131,7 +122,7 @@ fn run(
     common: Common,
     named_test: Option<String>,
     simulation: Option<Simulation>,
-    driver_setup: DriverSetup,
+    context_factory: Py<PyAny>,
     execution: Execution,
     paths_selection: SelectionPaths,
 ) -> PyResult<()> {
@@ -152,6 +143,11 @@ fn run(
             ));
         }
     };
+    let backend = backend
+        .as_deref()
+        .map(str::parse::<Backend>)
+        .transpose()
+        .map_err(|()| pyo3::exceptions::PyTypeError::new_err("backend must be a Backend member"))?;
     let request = Request {
         model,
         executable,
@@ -163,7 +159,7 @@ fn run(
     };
     let selection = selection(paths_selection);
     let types = Arc::new(Types::load(py)?);
-    let mut environment = LocalEnvironment(factory(driver_setup, Arc::clone(&types)));
+    let mut environment = LocalEnvironment(factory(context_factory, Arc::clone(&types)));
     let result = py.detach(move || run_model(&request, &selection, &mut environment));
     result.map_err(|failure| error::from_run(py, &types, *failure))
 }

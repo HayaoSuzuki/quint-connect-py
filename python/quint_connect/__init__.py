@@ -1,10 +1,10 @@
 """Run Quint model traces against a Python driver."""
 
 from collections.abc import Callable, Iterable, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Protocol, cast
+from typing import Protocol, cast, overload
 
 from . import _native
 from ._enums import Backend, DriverStage, QuintStage, WorkspaceStage
@@ -128,40 +128,98 @@ def _unsigned(name: str, value: int | None) -> int | None:
     return value
 
 
-def _driver_setup(
-    factory: Callable[[], Driver] | None,
-    context: Callable[[], AbstractContextManager[Driver]] | None,
-) -> tuple[Callable[[], Driver | AbstractContextManager[Driver]], bool]:
+type _DriverFactory = Callable[[], Driver]
+type _DriverContextFactory = Callable[[], AbstractContextManager[Driver]]
+
+
+def _context_factory(
+    factory: _DriverFactory | None,
+    context: _DriverContextFactory | None,
+) -> _DriverContextFactory:
     if factory is not None and context is None:
-        return factory, False
+        return lambda: nullcontext(factory())
     if context is not None and factory is None:
-        return context, True
+        return context
     message = "supply exactly one of driver_factory and driver_context"
     raise TypeError(message)
 
 
+@overload
 def replay(
     traces: FilePath | Sequence[FilePath],
-    driver_factory: Callable[[], Driver] | None = None,
+    driver_factory: _DriverFactory,
     *,
-    driver_context: Callable[[], AbstractContextManager[Driver]] | None = None,
+    driver_context: None = None,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+) -> None: ...
+
+
+@overload
+def replay(
+    traces: FilePath | Sequence[FilePath],
+    driver_factory: None = None,
+    *,
+    driver_context: _DriverContextFactory,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+) -> None: ...
+
+
+def replay(
+    traces: FilePath | Sequence[FilePath],
+    driver_factory: _DriverFactory | None = None,
+    *,
+    driver_context: _DriverContextFactory | None = None,
     action_path: Sequence[str] = (),
     state_path: Sequence[str] = (),
 ) -> None:
-    """Replay each saved trace with a fresh driver from the factory."""
+    """Replay each saved trace with a fresh driver and close its context."""
     paths = (
         [cast("FilePath", traces)] if isinstance(traces, (str, PathLike)) else traces
     )
     _native.replay(
-        paths, _driver_setup(driver_factory, driver_context), (action_path, state_path)
+        paths,
+        _context_factory(driver_factory, driver_context),
+        (action_path, state_path),
     )
+
+
+@overload
+def run(
+    config: Simulation | NamedTest,
+    driver_factory: _DriverFactory,
+    *,
+    driver_context: None = None,
+    quint: FilePath,
+    seed: int | None = None,
+    backend: Backend | None = None,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+    artifact_dir: FilePath | None = None,
+) -> None: ...
+
+
+@overload
+def run(
+    config: Simulation | NamedTest,
+    driver_factory: None = None,
+    *,
+    driver_context: _DriverContextFactory,
+    quint: FilePath,
+    seed: int | None = None,
+    backend: Backend | None = None,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+    artifact_dir: FilePath | None = None,
+) -> None: ...
 
 
 def run(  # noqa: PLR0913 - The documented options are keyword-only.
     config: Simulation | NamedTest,
-    driver_factory: Callable[[], Driver] | None = None,
+    driver_factory: _DriverFactory | None = None,
     *,
-    driver_context: Callable[[], AbstractContextManager[Driver]] | None = None,
+    driver_context: _DriverContextFactory | None = None,
     quint: FilePath,
     seed: int | None = None,
     backend: Backend | None = None,
@@ -169,7 +227,7 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
     state_path: Sequence[str] = (),
     artifact_dir: FilePath | None = None,
 ) -> None:
-    """Generate Quint traces and replay each one with a fresh driver."""
+    """Generate Quint traces and replay each with its own driver lifetime."""
     seed = _unsigned("seed", seed)
     if backend is not None and not isinstance(backend, Backend):
         message = "backend must be a Backend member"
@@ -196,7 +254,7 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
         (config.spec, config.main, _unsigned("max_samples", config.max_samples)),
         mode,
         options,
-        _driver_setup(driver_factory, driver_context),
+        _context_factory(driver_factory, driver_context),
         (quint, seed, None if backend is None else backend.value, artifact_dir),
         (action_path, state_path),
     )

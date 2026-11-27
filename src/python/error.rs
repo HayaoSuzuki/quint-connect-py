@@ -4,7 +4,7 @@ use pyo3::types::PyBytes;
 
 use crate::cli::InvalidRequest;
 use crate::replay::{
-    DriverStage, FailedTrace, Mismatch, ReplayError, TraceCause, TraceFile, TraceProblem,
+    DriverFailureSite, FailedTrace, Mismatch, ReplayError, TraceCause, TraceFile, TraceProblem,
 };
 use crate::runner::{ArtifactError, ChildIoStage, Cleanup, Exit, Failure, RunError};
 
@@ -88,16 +88,16 @@ fn replay_exception(py: Python<'_>, types: &Types, failure: ReplayError<PyErr>) 
 
 fn trace_failure(py: Python<'_>, types: &Types, failure: FailedTrace<PyErr>) -> PyResult<PyErr> {
     let error = match failure.problem {
-        TraceProblem::Driver { step, stage, cause } => {
-            let stage = match stage {
-                DriverStage::Factory => "FACTORY",
-                DriverStage::Apply => "APPLY",
-                DriverStage::Observe => "OBSERVE",
-                DriverStage::Exit => "EXIT",
+        TraceProblem::Driver { site, cause } => {
+            let stage = match site {
+                DriverFailureSite::Factory => "FACTORY",
+                DriverFailureSite::Apply(_) => "APPLY",
+                DriverFailureSite::Observe(_) => "OBSERVE",
+                DriverFailureSite::Exit => "EXIT",
             };
             let error =
                 DriverError::new_err(format!("driver {} failed", stage.to_ascii_lowercase()));
-            trace_attributes(&error, py, &failure.trace, step)?;
+            trace_attributes(&error, py, &failure.trace, site.step_index())?;
             error
                 .value(py)
                 .setattr("stage", stage_member(py, "DriverStage", stage)?)?;

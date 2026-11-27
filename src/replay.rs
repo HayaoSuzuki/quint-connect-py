@@ -9,11 +9,15 @@ pub trait Driver {
 
     fn apply(&mut self, action: &Action) -> Result<(), Self::Error>;
     fn observe(&mut self) -> Result<Value, Self::Error>;
+    /// Consumes the driver after replay, before another trace can start.
     fn finish(
-        &mut self,
+        self,
         _trace: &TraceFile,
         _problem: Option<&TraceProblem<Self::Error>>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), Self::Error>
+    where
+        Self: Sized,
+    {
         Ok(())
     }
 }
@@ -38,11 +42,20 @@ pub fn saved_files(paths: &[PathBuf], caller: &Path) -> Vec<TraceFile> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DriverStage {
+pub enum DriverFailureSite {
     Factory,
-    Apply,
-    Observe,
+    Apply(usize),
+    Observe(usize),
     Exit,
+}
+
+impl DriverFailureSite {
+    pub const fn step_index(self) -> Option<usize> {
+        match self {
+            Self::Factory | Self::Exit => None,
+            Self::Apply(index) | Self::Observe(index) => Some(index),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -55,18 +68,16 @@ pub struct Mismatch {
 #[derive(Debug)]
 pub enum TraceProblem<E> {
     Driver {
-        step: Option<usize>,
-        stage: DriverStage,
+        site: DriverFailureSite,
         cause: Box<E>,
     },
     Mismatch(Mismatch),
 }
 
 impl<E> TraceProblem<E> {
-    fn driver(step: Option<usize>, stage: DriverStage, cause: E) -> Self {
+    fn driver(site: DriverFailureSite, cause: E) -> Self {
         Self::Driver {
-            step,
-            stage,
+            site,
             cause: Box::new(cause),
         }
     }
@@ -182,13 +193,13 @@ fn replay_trace<E: ReplayEnvironment>(
             match (result, cleanup) {
                 (Ok(()), Ok(())) => return Ok(()),
                 (Ok(()), Err(cause)) => {
-                    (TraceProblem::driver(None, DriverStage::Exit, cause), None)
+                    (TraceProblem::driver(DriverFailureSite::Exit, cause), None)
                 }
                 (Err(problem), cleanup) => (problem, cleanup.err().map(Box::new)),
             }
         }
         Err(cause) => (
-            TraceProblem::driver(None, DriverStage::Factory, cause),
+            TraceProblem::driver(DriverFailureSite::Factory, cause),
             None,
         ),
     };
@@ -210,11 +221,11 @@ fn replay_steps<E: ReplayEnvironment>(
         environment.event(ReplayEvent::Apply(trace, index, &step.action));
         driver
             .apply(&step.action)
-            .map_err(|cause| TraceProblem::driver(Some(index), DriverStage::Apply, cause))?;
+            .map_err(|cause| TraceProblem::driver(DriverFailureSite::Apply(index), cause))?;
         environment.event(ReplayEvent::Observe(trace, index, &step.expected));
         let actual = driver
             .observe()
-            .map_err(|cause| TraceProblem::driver(Some(index), DriverStage::Observe, cause))?;
+            .map_err(|cause| TraceProblem::driver(DriverFailureSite::Observe(index), cause))?;
         if step.expected != actual {
             return Err(TraceProblem::Mismatch(Mismatch {
                 step_index: index,

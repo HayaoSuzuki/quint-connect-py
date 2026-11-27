@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use super::*;
-use crate::cli::{Mode, Plan, Request};
+use crate::cli::{Backend, Mode, Plan, Request};
 use crate::runner::{
     ArtifactError, ChildIoError, ChildIoStage, ChildOutput, Cleanup, Exit, Failure, RunEnvironment,
     RunError, RunEvent, run_from,
@@ -529,10 +529,10 @@ fn request(value: &Json) -> Request {
         model: string(&cli["model"]["value"]).into(),
         executable: string(&cli["executable"]["value"]["value"]).into(),
         main: option(&cli["main"], string),
-        backend: option(&cli["backend"], |tag| {
-            string(&tag["tag"])
-                .trim_end_matches("Backend")
-                .to_lowercase()
+        backend: option(&cli["backend"], |tag| match tag["tag"].as_str() {
+            Some("RustBackend") => Backend::Rust,
+            Some("TypeScriptBackend") => Backend::TypeScript,
+            _ => panic!("invalid backend {tag}"),
         }),
         mode,
         seed: option(&cli["seed"], decode_seed),
@@ -654,12 +654,12 @@ impl GeneratedRun {
                             json!({"detail": detail, "artifacts": artifacts}),
                         )
                     }
-                    TraceProblem::Driver { step, stage, cause } => {
-                        let location = step.map_or_else(
+                    TraceProblem::Driver { site, cause } => {
+                        let location = site.step_index().map_or_else(
                             || tagged("AtTrace", self.position(trace)),
                             |index| tagged("AtStep", self.step_position(trace, index)),
                         );
-                        let detail = json!({"location": location, "stage": driver_stage(stage), "cause": *cause});
+                        let detail = json!({"location": location, "stage": driver_stage(site), "cause": *cause});
                         tagged(
                             "GeneratedDriverFailed",
                             json!({
