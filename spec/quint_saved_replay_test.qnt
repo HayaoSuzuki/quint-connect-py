@@ -92,6 +92,17 @@ module quint_saved_replay_test {
         cause: "permission denied",
       }))) and filesystem == initialFilesystem and safety)
 
+  run hostReadErrorWithoutMappedFilePreservesCauseTest = {
+    val directory = cli::RelativePath("results")
+    init
+      .then(startReplayFromCaller(1, "/caller", List(directory), Map(), itemsSelection))
+      .then(readSavedPath(1, ReadFailed("is a directory")))
+      .expect(finishedAs(failed(TraceFailed({
+        location: AtSavedTrace({ path: fs::SavedFile("results"), position: firstPosition }),
+        cause: "is a directory",
+      }))) and safety)
+  }
+
   run malformedSecondFileIsOpenedAfterFirstDriverCompletesTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("good.itf.json"), fs::SavedFile("bad.itf.json"), fs::SavedFile("empty.itf.json")), itemsSelection))

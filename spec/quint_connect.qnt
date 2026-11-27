@@ -984,19 +984,24 @@ module quint_connect {
       | ByteInputInvalidJson => InvalidItf({ location: InvalidFile, cause: "invalid JSON" })
     }
 
-  pure def validateSavedFile(snapshot: fs::FileSystem, path: fs::FilePath, result: ReadResult, selection: itf::Selection): ValidationResult = {
-    match fs::readFileBytes(snapshot, path) {
-      | FileUnavailable(problem) => InvalidItf({
-          location: InvalidFile,
-          cause: if (problem == fs::AliasCycle) "alias cycle" else "file not found",
-        })
-      | FileBytes(bytes) =>
-        match result {
-          | ReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
-          | ReadSucceeded => validationForBytes(bytes, selection)
+  pure def validateSavedInput(
+    snapshot: fs::FileSystem, access: SavedAccess, result: ReadResult, selection: itf::Selection
+  ): ValidationResult =
+    match result {
+      | ReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
+      | ReadSucceeded =>
+        match access {
+          | NoSuchSavedPath => InvalidItf({ location: InvalidFile, cause: "file not found" })
+          | ReadAt(path) =>
+            match fs::readFileBytes(snapshot, path) {
+              | FileUnavailable(problem) => InvalidItf({
+                  location: InvalidFile,
+                  cause: if (problem == fs::AliasCycle) "alias cycle" else "file not found",
+                })
+              | FileBytes(bytes) => validationForBytes(bytes, selection)
+            }
         }
     }
-  }
 
   action readSavedPath(id: CallId, result: ReadResult): bool =
     match calls.get(id).phase {
@@ -1008,10 +1013,7 @@ module quint_connect {
             val recorded = recordEvent(current, current.phase, SavedReadAttempted({
               path: input.requested, position: tracePosition(batch),
             }))
-            val validated = match input.access {
-              | ReadAt(path) => validateSavedFile(filesystem, path, result, current.selection)
-              | NoSuchSavedPath => InvalidItf({ location: InvalidFile, cause: "file not found" })
-            }
+            val validated = validateSavedInput(filesystem, input.access, result, current.selection)
             changeCall(id, onValidation(recorded, batch, validated))
           }
           | _ => inapplicable
