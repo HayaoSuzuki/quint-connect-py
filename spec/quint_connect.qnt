@@ -1,6 +1,6 @@
 // Observable behavior of run() and replay() in issue #1.
 // Calls progress independently through command planning, ITF decoding, comparison,
-// and filesystem effects. Process outcomes and lossless JSON lexing are external inputs.
+// and filesystem effects. Process and operating-system outcomes are external inputs.
 module quint_connect {
   import quint_values as qv from "./quint_values"
   import quint_itf as itf from "./quint_itf"
@@ -237,8 +237,8 @@ module quint_connect {
   const CALL_IDS: Set[CallId]
   const WORKSPACE_IDS: Set[WorkspaceId]
   const DRIVER_IDS: Set[DriverId]
-  // The reader maps an exact byte sequence to one lossless lexed JSON tree.
-  const DECODED_DOCUMENTS: fs::Bytes -> itf::ItfDocument
+  const JSON_LABELS: itf::TextLabels
+  const GENERATED_INPUTS: Set[fs::Bytes]
   const SAVED_INPUTS: str -> fs::Bytes
 
   pure val initialFilesystem: fs::FileSystem = {
@@ -655,10 +655,12 @@ module quint_connect {
     validateTrace(id, fromDecodedTrace(itf::decodeItf(document, calls.get(id).selection)))
 
   pure def validationForBytes(bytes: fs::Bytes, selection: itf::Selection): ValidationResult =
-    if (DECODED_DOCUMENTS.keys().contains(bytes))
-      fromDecodedTrace(itf::decodeItf(DECODED_DOCUMENTS.get(bytes), selection))
-    else
-      InvalidItf({ location: InvalidFile, cause: "invalid JSON" })
+    match itf::parseItfBytes(bytes, JSON_LABELS) {
+      | ByteInputParsed(document) => fromDecodedTrace(itf::decodeItf(document, selection))
+      | ByteInputInvalidUtf8 => InvalidItf({ location: InvalidFile, cause: "invalid UTF-8" })
+      | ByteInputInvalidJson => InvalidItf({ location: InvalidFile, cause: "invalid JSON" })
+      | ByteInputUnlabeledText => InvalidItf({ location: InvalidFile, cause: "unlabeled JSON text in model input" })
+    }
 
   action validateBytes(id: CallId, bytes: fs::Bytes): bool =
     validateTrace(id, validationForBytes(bytes, calls.get(id).selection))
@@ -1368,11 +1370,12 @@ module quint_connect {
       nondet workspace = WORKSPACE_IDS.oneOf()
       nondet driver = DRIVER_IDS.oneOf()
       nondet observed = Set(integerDigit(0), integerDigit(1), booleanValue(true), textValue("fixture"), itemSet).oneOf()
-      nondet producedBytes = DECODED_DOCUMENTS.keys().union(Set(List(123))).oneOf()
+      nondet producedBytes = GENERATED_INPUTS.union(Set(List(123))).oneOf()
       any {
         startReplay(id, List()),
         startReplay(id, List(0, 1)),
         startReplay(id, List(0, 0)),
+        startReplayPaths(id, List("good.itf.json"), { ...defaultSelection, statePath: List("items") }),
         startReplayPaths(id, List("good.itf.json", "bad.itf.json"), { ...defaultSelection, statePath: List("items") }),
         startReplayPaths(id, List("good.itf.json", "missing.itf.json"), { ...defaultSelection, statePath: List("items") }),
         readSavedPath(id, SavedReadSucceeded),
@@ -1450,11 +1453,6 @@ module quint_connect_documents {
 
   pure val itemsSelection: itf::Selection = { actionPath: List(), statePath: List("items") }
 
-  pure val emptyDocument: itf::ItfDocument = {
-    root: 1,
-    nodes: List(itf::RawArray(List()), itf::RawObject(List(("vars", 0), ("states", 0)))),
-  }
-
   pure val namedBytes: fs::Bytes = List(
     123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34,
     44, 34, 100, 105, 115, 112, 97, 116, 99, 104, 34, 93, 44, 34, 115, 116,
@@ -1467,27 +1465,6 @@ module quint_connect_documents {
     10,
   )
 
-  pure val namedDocument: itf::ItfDocument = {
-    root: 14,
-    nodes: List(
-      itf::RawText({ spelling: "items", codePoints: List(105, 116, 101, 109, 115) }),
-      itf::RawText({ spelling: "dispatch", codePoints: List(100, 105, 115, 112, 97, 116, 99, 104) }),
-      itf::RawArray(List(0, 1)),
-      itf::RawText({ spelling: "1", codePoints: List(49) }),
-      itf::RawObject(List(("#bigint", 3))),
-      itf::RawBoolean(true),
-      itf::RawArray(List(4, 5)),
-      itf::RawObject(List(("#set", 6))),
-      itf::RawText({ spelling: "init", codePoints: List(105, 110, 105, 116) }),
-      itf::RawArray(List()),
-      itf::RawObject(List(("#tup", 9))),
-      itf::RawObject(List(("tag", 8), ("value", 10))),
-      itf::RawObject(List(("items", 7), ("dispatch", 11))),
-      itf::RawArray(List(12)),
-      itf::RawObject(List(("vars", 2), ("states", 13))),
-    ),
-  }
-
   pure val savedInputs: str -> fs::Bytes = Map(
     "good.itf.json" -> originalBytes,
     "bad.itf.json" -> List(123),
@@ -1495,13 +1472,28 @@ module quint_connect_documents {
     "named.itf.json" -> namedBytes,
   )
 
-  pure val decodedDocuments: fs::Bytes -> itf::ItfDocument =
-    Map(originalBytes -> compoundDocument, otherBytes -> emptyDocument, namedBytes -> namedDocument)
+  pure val generatedInputs: Set[fs::Bytes] = Set(originalBytes, otherBytes, namedBytes)
+
+  pure val jsonLabels: itf::TextLabels = Map(
+    List(118, 97, 114, 115) -> "vars",
+    List(115, 116, 97, 116, 101, 115) -> "states",
+    List(105, 116, 101, 109, 115) -> "items",
+    List(35, 115, 101, 116) -> "#set",
+    List(35, 98, 105, 103, 105, 110, 116) -> "#bigint",
+    List(49) -> "1",
+    List(109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107, 101, 110) -> "mbt::actionTaken",
+    List(109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115) -> "mbt::nondetPicks",
+    List(105, 110, 105, 116) -> "init",
+    List(100, 105, 115, 112, 97, 116, 99, 104) -> "dispatch",
+    List(116, 97, 103) -> "tag",
+    List(118, 97, 108, 117, 101) -> "value",
+    List(35, 116, 117, 112) -> "#tup",
+  )
 }
 
 module quint_connect_sample {
   import quint_connect_documents.*
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), DECODED_DOCUMENTS = decodedDocuments, SAVED_INPUTS = savedInputs).*
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), JSON_LABELS = jsonLabels, GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs).*
 
   observation replayStarted = anyCallHas(event =>
     match event {

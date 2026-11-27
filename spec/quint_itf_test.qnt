@@ -224,4 +224,98 @@ module quint_itf_test {
       decimalFromCodePoints(List(49, 46, 48)) == NotDecimal,
       decimalFromCodePoints(List(1633)) == NotDecimal,
     })
+
+  pure val byteTestLabels: TextLabels = Map(
+    List(118, 97, 114, 115) -> "vars",
+    List(115, 116, 97, 116, 101, 115) -> "states",
+    List(105, 116, 101, 109, 115) -> "items",
+    List(35, 116, 117, 112) -> "#tup",
+    List(128578) -> "🙂",
+    List(35, 98, 105, 103, 105, 110, 116) -> "#bigint",
+    List(49) -> "1",
+    List(109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107, 101, 110) -> "mbt::actionTaken",
+    List(109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115) -> "mbt::nondetPicks",
+    List(105, 110, 105, 116) -> "init",
+  )
+
+  pure val rawUnicodeItf: List[int] = List(
+    123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34,
+    93, 44, 34, 115, 116, 97, 116, 101, 115, 34, 58, 91, 123, 34, 105, 116,
+    101, 109, 115, 34, 58, 123, 34, 35, 116, 117, 112, 34, 58, 91, 34, 240,
+    159, 153, 130, 34, 44, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58,
+    34, 49, 34, 125, 93, 125, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116,
+    105, 111, 110, 84, 97, 107, 101, 110, 34, 58, 34, 105, 110, 105, 116, 34,
+    44, 34, 109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99,
+    107, 115, 34, 58, 123, 125, 125, 93, 125,
+  )
+
+  pure val escapedUnicodeItf: List[int] = List(
+    123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34,
+    93, 44, 34, 115, 116, 97, 116, 101, 115, 34, 58, 91, 123, 34, 105, 116,
+    101, 109, 115, 34, 58, 123, 34, 35, 116, 117, 112, 34, 58, 91, 34, 92,
+    117, 68, 56, 51, 68, 92, 117, 68, 69, 52, 50, 34, 44, 123, 34, 35,
+    98, 105, 103, 105, 110, 116, 34, 58, 34, 92, 117, 48, 48, 51, 49, 34,
+    125, 93, 125, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110,
+    84, 97, 107, 101, 110, 34, 58, 34, 105, 110, 105, 116, 34, 44, 34, 109,
+    98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115, 34,
+    58, 123, 125, 125, 93, 125,
+  )
+
+  pure val rawNumberItf: List[int] = List(
+    123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34,
+    93, 44, 34, 115, 116, 97, 116, 101, 115, 34, 58, 91, 123, 34, 105, 116,
+    101, 109, 115, 34, 58, 49, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116,
+    105, 111, 110, 84, 97, 107, 101, 110, 34, 58, 34, 105, 110, 105, 116, 34,
+    44, 34, 109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99,
+    107, 115, 34, 58, 123, 125, 125, 93, 125,
+  )
+
+  pure val duplicateKeyItf: List[int] = List(
+    123, 34, 118, 97, 114, 115, 34, 58, 91, 93, 44, 34, 92, 117, 48, 48,
+    55, 54, 97, 114, 115, 34, 58, 91, 93, 44, 34, 115, 116, 97, 116, 101,
+    115, 34, 58, 91, 93, 125,
+  )
+
+  pure val tupleFromBytes: ItfValue = {
+    nodes: List(TextNode("🙂"), IntegerNode({ negative: false, digits: List(1) }), TupleNode(List(0, 1))),
+    root: 2,
+  }
+
+  pure def bytesDecodeToSameTuple(bytes: List[int]): bool =
+    match parseItfBytes(bytes, byteTestLabels) {
+      | ByteInputParsed(document) =>
+        oneStepMatches(decodeItf(document, { ...defaults, statePath: List("items") }), stepData =>
+          stepData.name == "init" and equalValues(stepData.expected, tupleFromBytes)
+        )
+      | _ => false
+    }
+
+  run rawAndEscapedUnicodeBytesGiveTheSameItfValueTest =
+    assert(bytesDecodeToSameTuple(rawUnicodeItf) and bytesDecodeToSameTuple(escapedUnicodeItf))
+
+  run escapedDuplicateIsDetectedAtTheItfBoundaryTest =
+    assert(match parseItfBytes(duplicateKeyItf, byteTestLabels) {
+      | ByteInputParsed(document) => decodeItf(document, defaults) == InvalidTrace(InvalidJsonTree)
+      | _ => false
+    })
+
+  run numberGrammarAndItfNumberEncodingAreBothCheckedTest =
+    assert(match parseItfBytes(rawNumberItf, byteTestLabels) {
+      | ByteInputParsed(document) => decodeItf(document, { ...defaults, statePath: List("items") }) ==
+        InvalidTrace(AtState({ index: 0, problem: InvalidExpectedValue }))
+      | _ => false
+    })
+
+  run invalidUtf8AndJsonSyntaxAreDistinguishedTest =
+    assert(and {
+      parseItfBytes(List(192, 175), byteTestLabels) == ByteInputInvalidUtf8,
+      parseItfBytes(List(123), byteTestLabels) == ByteInputInvalidJson,
+    })
+
+  run byteAdapterRequiresCompleteDistinctTextLabelsTest =
+    assert(and {
+      parseItfBytes(List(34, 97, 34), Map()) == ByteInputUnlabeledText,
+      parseItfBytes(List(91, 34, 97, 34, 44, 34, 98, 34, 93),
+        Map(List(97) -> "same", List(98) -> "same")) == ByteInputUnlabeledText,
+    })
 }

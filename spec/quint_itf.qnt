@@ -2,6 +2,7 @@
 // String tokens supply the opaque spelling and its Unicode code points from lexing.
 module quint_itf {
   import quint_values.* from "./quint_values"
+  import quint_json as json from "./quint_json"
 
   type RawNode =
     | RawBoolean(bool)
@@ -386,4 +387,52 @@ module quint_itf {
         | NotObject => InvalidTrace(InvalidEnvelope)
         | Fields(members) => decodeEnvelope(document, selection, members)
       }
+
+  // Quint strings are opaque. An instance names each decoded code-point sequence
+  // with its corresponding string; the finite map includes its fixture vocabulary.
+  type TextLabels = List[int] -> str
+
+  type ItfByteInput =
+    | ByteInputInvalidUtf8
+    | ByteInputInvalidJson
+    | ByteInputUnlabeledText
+    | ByteInputParsed(ItfDocument)
+
+  pure def neededLabels(document: json::JsonDocument): Set[List[int]] =
+    document.nodes.foldl(Set(), (needed, node) =>
+      match node {
+        | JsonString(points) => needed.union(Set(points))
+        | JsonObject(entries) => entries.foldl(needed, (acc, entry) => acc.union(Set(entry._1)))
+        | _ => needed
+      }
+    )
+
+  pure def jsonToRaw(node: json::JsonNode, names: TextLabels): RawNode =
+    match node {
+      | JsonBoolean(value) => RawBoolean(value)
+      | JsonString(points) => RawText({ spelling: names.get(points), codePoints: points })
+      | JsonNumber => RawNumber
+      | JsonNull => RawNull
+      | JsonArray(ids) => RawArray(ids)
+      | JsonObject(entries) =>
+        RawObject(entries.foldl(List(), (acc, entry) => acc.append((names.get(entry._1), entry._2))))
+    }
+
+  pure def parseItfBytes(bytes: List[int], names: TextLabels): ItfByteInput =
+    match json::parseJson(bytes) {
+      | InvalidUtf8 => ByteInputInvalidUtf8
+      | InvalidJsonSyntax => ByteInputInvalidJson
+      | ParsedJson(document) => {
+        val needed = neededLabels(document)
+        if (not(needed.subseteq(names.keys())))
+          ByteInputUnlabeledText
+        else if (needed.map(points => names.get(points)).size() != needed.size())
+          ByteInputUnlabeledText
+        else
+          ByteInputParsed({
+            root: document.root,
+            nodes: document.nodes.foldl(List(), (acc, node) => acc.append(jsonToRaw(node, names))),
+          })
+      }
+    }
 }
