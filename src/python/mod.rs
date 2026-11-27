@@ -126,8 +126,8 @@ fn run(
     result.map_err(|failure| error::from_run(py, &types, *failure))
 }
 
-#[pymodule]
-fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pymodule(name = "_native")]
+fn native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(replay, module)?)?;
     module.add_function(wrap_pyfunction!(run, module)?)?;
     error::register(module)
