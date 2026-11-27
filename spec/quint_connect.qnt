@@ -29,9 +29,10 @@ module quint_connect {
   pure def textValue(value: qv::Text): Value =
     { nodes: List(qv::TextNode(value)), root: 0 }
 
+  type OperationArguments = qv::Text -> Value
   type Operation = {
     name: qv::Text,
-    arguments: qv::Text -> Value,
+    arguments: OperationArguments,
   }
 
   type TraceStep = {
@@ -171,6 +172,7 @@ module quint_connect {
 
   type FactoryResult = FactorySucceeded(DriverId) | FactoryFailed(str)
   type OperationResult = OperationApplied | OperationFailed(str)
+  type DriverArgumentUpdate = ArgumentsUnchanged | ArgumentsReplaced(OperationArguments)
   type ObservationResult = Observed(Value) | ObservationFailed(str)
   type StorageResult = StorageSucceeded | StorageFailed(str)
 
@@ -261,6 +263,7 @@ module quint_connect {
     | FactoryCalled(TracePosition)
     | DriverCreated({ trace: TracePosition, driver: DriverId })
     | OperationCalled({ context: DriverStep, operation: Operation })
+    | DriverArgumentsChanged({ context: DriverStep, arguments: OperationArguments })
     | ObservationCalled({ context: DriverStep, expected: Value })
     | ObservationMatched({ position: StepPosition, actual: Value })
     | DifferenceObserved(Mismatch)
@@ -447,9 +450,18 @@ module quint_connect {
   pure def driverStep(active: ActiveTrace): DriverStep =
     { position: { trace: tracePosition(active.validated.batch), stepIndex: active.stepIndex }, driver: active.driver }
 
-  pure def onOperation(s: CallState, active: ActiveTrace, result: OperationResult): CallState = {
+  pure def onOperation(
+    s: CallState, active: ActiveTrace, result: OperationResult, update: DriverArgumentUpdate
+  ): CallState = {
     val context = driverStep(active)
-    val recorded = recordEvent(s, s.phase, OperationCalled({ context: context, operation: currentStep(active).operation }))
+    val called = recordEvent(s, s.phase, OperationCalled({ context: context, operation: currentStep(active).operation }))
+    // Only the copy handed to the callback can change. The validated step
+    // remains the source of the arguments recorded in mismatch diagnostics.
+    val recorded = match update {
+      | ArgumentsUnchanged => called
+      | ArgumentsReplaced(arguments) =>
+        recordEvent(called, s.phase, DriverArgumentsChanged({ context: context, arguments: arguments }))
+    }
     match result {
       | OperationApplied => { ...recorded, phase: AwaitingObservation(active) }
       | OperationFailed(cause) =>
@@ -969,11 +981,17 @@ module quint_connect {
     },
   }
 
-  action applyOperation(id: CallId, result: OperationResult): bool =
+  action applyOperationWithUpdate(id: CallId, result: OperationResult, update: DriverArgumentUpdate): bool =
     match calls.get(id).phase {
-      | AwaitingOperation(active) => changeCall(id, onOperation(calls.get(id), active, result))
+      | AwaitingOperation(active) => changeCall(id, onOperation(calls.get(id), active, result, update))
       | _ => inapplicable
     }
+
+  action applyOperation(id: CallId, result: OperationResult): bool =
+    applyOperationWithUpdate(id, result, ArgumentsUnchanged)
+
+  action applyOperationWithMutation(id: CallId, result: OperationResult, argumentsAfter: OperationArguments): bool =
+    applyOperationWithUpdate(id, result, ArgumentsReplaced(argumentsAfter))
 
   action observeState(id: CallId, result: ObservationResult): bool =
     match calls.get(id).phase {
@@ -1281,8 +1299,16 @@ module quint_connect {
         }
       )
 
+  pure def appliedOperationBefore(history: List[Event], index: int, predicate: (Event) => bool): bool =
+    if (index > 0)
+      match history.nth(index - 1) {
+        | DriverArgumentsChanged(_) => previousIs(history, index - 1, predicate)
+        | _ => predicate(history.nth(index - 1))
+      }
+    else false
+
   pure def observationFollowsOperation(history: List[Event], index: int, ctx: DriverStep): bool =
-    previousIs(history, index, event =>
+    appliedOperationBefore(history, index, event =>
       match event {
         | OperationCalled(operation) => operation.context == ctx
         | _ => false
@@ -1331,6 +1357,13 @@ module quint_connect {
           matchesValidatedStep(history, index, operation.context.position, entry =>
             entry.operation == operation.operation
           )
+      | DriverArgumentsChanged(change) =>
+        previousIs(history, index, event =>
+          match event {
+            | OperationCalled(operation) => operation.context == change.context
+            | _ => false
+          }
+        )
       | ObservationCalled(observation) =>
         observationFollowsOperation(history, index, observation.context) and
           matchesValidatedStep(history, index, observation.context.position, entry =>
@@ -1341,14 +1374,13 @@ module quint_connect {
       | DifferenceObserved(detail) =>
         not(qv::equalValues(detail.step.expected, detail.actual)) and
           matchingObservation(history, index, detail.position, detail.step.expected) and
-          if (index >= 2)
-            match history.nth(index - 2) {
+          appliedOperationBefore(history, index - 1, event =>
+            match event {
               | OperationCalled(operation) =>
                 operation.context.position == detail.position and operation.operation == detail.step.operation
               | _ => false
             }
-          else
-            false
+          )
       | _ => true
     }
 
@@ -2010,6 +2042,7 @@ module quint_connect {
         createDriver(id, FactoryFailed("factory failed")),
         applyOperation(id, OperationApplied),
         applyOperation(id, OperationFailed("operation failed")),
+        applyOperationWithMutation(id, OperationApplied, Map(List(97, 109, 111, 117, 110, 116) -> integerDigit(2))),
         observeState(id, Observed(observed)),
         observeState(id, ObservationFailed("observation failed")),
         planArtifactDirectories(id, List(42, 100 + id)),
@@ -2213,6 +2246,13 @@ module quint_connect_sample {
   observation driverCreated = anyCallHas(event =>
     match event {
       | DriverCreated(_) => true
+      | _ => false
+    }
+  )
+
+  observation driverArgumentsChanged = anyCallHas(event =>
+    match event {
+      | DriverArgumentsChanged(_) => true
       | _ => false
     }
   )
