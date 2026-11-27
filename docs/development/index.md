@@ -1,10 +1,25 @@
 # 開発者向けドキュメント
 
-- [初期設計と受け入れ条件](work/initial-design/design.md) — 公開 API、モジュールの責務、Quint と Python の検証の対応。
-- [Quint の仕様](../../spec/quint_connect.qnt) — 生成と再生、失敗の優先順位、呼び出しごとの分離。
-- [ドライバーの寿命](../../spec/quint_driver_lifecycle.qnt) — トレースごとの開始と終了、先に起きた失敗の優先順位。
-- [Quint の仕様レビュー](work/initial-design/spec-review.md) — 検証範囲、不変条件、実行結果。
-- [Python 実装計画](work/initial-design/plan.md) — 仕様から実装と受け入れ試験への対応。
+## 現行の契約と検証
+
+公開 API の使用例は [利用ガイド](../user/guides/usage.md) にあります。生成経路は Quint を実行して ITF を用意し、保存済み ITF と同じ再生処理に渡します。Rust は ITF の解釈、処理順、作業先と成果物を担当します。PyO3 は Python コールバックと例外を扱います。
+
+| 対象 | Quint で表す契約 | 実装を検証するテスト |
+| --- | --- | --- |
+| `run()` の生成 | シミュレーション、名前の完全一致、正規表現による一括選択を CLI 引数に変換する。[CLI モデル](../../spec/quint_cli.qnt) | 両評価器での生成と一括選択。[Python 結合テスト](../../tests/test_quint_integration.py) |
+| `run()` と `replay()` の ITF | 操作・引数・比較対象を読み取り、トレースをドライバー起動前に検証する。値の正規化と等値性を定める。[ITF モデル](../../spec/quint_itf.qnt) · [値モデル](../../spec/quint_values.qnt) | 不正な末尾、操作引数のスナップショット、複合値の照合。[Python 再生テスト](../../tests/test_replay.py) |
+| 既定の状態比較と失敗の優先順位 | 操作の適用、観測、等値比較、最初の失敗への診断の付加を一連の処理として扱う。[主モデル](../../spec/quint_connect.qnt) | 同じランナーに生成済み fixture の入出力を与える。[Rust 照合テスト](../../src/conformance.rs) · [fixture の生成手順](../../spec/fixtures/README.md) |
+| `comparison=None` と `StateComparison` | 操作だけの再生では観測を省略し、独自比較の採否や例外でステップの結果を決める。[比較モデル](../../spec/quint_replay_comparison_test.qnt) | 省略時の検証、期待値の変換、独自比較の採否、比較例外の ITF 保存と再生。[Python 再生テスト](../../tests/test_replay.py) · [Python 結合テスト](../../tests/test_quint_integration.py) |
+| `driver_context=` と例外 | トレースごとの開始と終了を対応させ、終了に失敗しても先に確定した失敗を優先する。[寿命モデル](../../spec/quint_driver_lifecycle.qnt) | `__exit__` と呼び出し元での不一致例外の同一性、注記、終了失敗の扱い。[Python 再生テスト](../../tests/test_replay.py) |
+| 作業先と失敗 ITF | 作業先の分離、保存先の排他確保、部分書き込み、コピー・清掃失敗時の優先順位を扱う。[ファイルシステムモデル](../../spec/quint_filesystem.qnt) · [成果物のシナリオ](../../spec/quint_artifact_directory_test.qnt) | 既存成果物の保持、失敗 ITF の再生、ワーカー間の保存先分離。[fixture](../../spec/fixtures/README.md) · [Python 結合テスト](../../tests/test_quint_integration.py) · [xdist テスト](../../tests/test_xdist.py) |
+
+主モデルが照合 fixture にする比較方式は既定の等値比較です。比較モデルは一つのステップに絞り、観測と独自比較の結果を外部入力として扱います。比較とドライバーの終了、成果物保存の組み合わせは Python の結合テストで確認します。Python 例外の型・属性・同一性と、ログや差分の表示は [Python 再生テスト](../../tests/test_replay.py) が担当します。
+
+## 設計履歴
+
+- [初期設計と受け入れ条件](work/initial-design/design.md)
+- [初版の Quint 仕様レビュー](work/initial-design/spec-review.md)
+- [初版の実装計画](work/initial-design/plan.md)
 
 ## 開発時の検証
 
