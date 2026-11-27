@@ -108,7 +108,9 @@ module quint_connect_test {
 
   run reservationAndNoGeneratedTracesTest =
     init
-      .then(failReservation(1, sampleSeed, "cannot reserve"))
+      .then(startRequestedRunWithAllocation(1, simulatorRequest(1, simulationWithCount(1)),
+        sampleSeed, defaultArtifactRoot, defaultSelection, { directories: List(), observations: Map() },
+        ReservationFailed("cannot reserve")))
       .then(startRun(2, namedGeneration))
       .then(startProcess(2))
       .then(completeGeneration(2, ProcessSucceeded(List())))

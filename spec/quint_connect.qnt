@@ -200,6 +200,7 @@ module quint_connect {
   type EmptyInput = NoInputPaths | NoGeneratedItf | NoTraceStates(TracePosition) | NoSavedTraceStates(SavedTracePosition)
 
   type WorkspaceStage = Reserve | Cleanup
+  type ReservationResult = ReservationSucceeded | ReservationFailed(str)
 
   type RequestProblem =
     | RejectedSeed
@@ -620,18 +621,29 @@ module quint_connect {
 
   action reservePlannedRun(
     id: CallId, request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand,
-    artifactRoot: str, state: CallState, target: ExecutionTarget
-  ): bool =
-    reserveRun(id, {
-      expectation: commandExpectation(request.config), seed: command.seed,
-      workspace: command.workspace, artifactRoot: artifactRoot,
-    }, recordEvent(state, Ready, CommandPrepared({
+    artifactRoot: str, state: CallState, target: ExecutionTarget, result: ReservationResult
+  ): bool = {
+    val planned = recordEvent(state, Ready, CommandPrepared({
       request: request, drawnSeed: drawnSeed, command: command, target: target,
-    })))
+    }))
+    match result {
+      | ReservationSucceeded =>
+        reserveRun(id, {
+          expectation: commandExpectation(request.config), seed: command.seed,
+          workspace: command.workspace, artifactRoot: artifactRoot,
+        }, planned)
+      | ReservationFailed(cause) => all {
+          calls.get(id).phase == Ready,
+          changeCall(id, stop(planned, SavedItf, WorkspaceFailed({
+            seed: command.seed, stage: Reserve, cause: cause,
+          }))),
+        }
+    }
+  }
 
-  action startRequestedRunWithPath(
+  action startRequestedRunWithAllocation(
     id: CallId, request: cli::CliRequest, drawnSeed: Seed, artifactRoot: str, selection: itf::Selection,
-    environment: PathEnvironment
+    environment: PathEnvironment, allocation: ReservationResult
   ): bool =
     match cli::quintCommand(request, drawnSeed) {
       | InvalidSeed => rejectRunRequest(id, RejectedSeed)
@@ -643,7 +655,7 @@ module quint_connect {
           val state = { ...calls.get(id), selection: selection }
           match command.executable {
             | DirectExecutable(executable) => reservePlannedRun(
-                id, request, drawnSeed, command, artifactRoot, state, ExplicitExecutable(executable))
+                id, request, drawnSeed, command, artifactRoot, state, ExplicitExecutable(executable), allocation)
             | SearchCallerPath(search) => {
               val result = path::searchPath(search.directory, search.name, environment.directories, environment.observations)
               val resolved = recordEvent(state, Ready, PathSearchCompleted({
@@ -651,7 +663,7 @@ module quint_connect {
               }))
               match result.resolution {
                 | Found(candidate) => reservePlannedRun(
-                    id, request, drawnSeed, command, artifactRoot, resolved, ExecutableOnPath(candidate))
+                    id, request, drawnSeed, command, artifactRoot, resolved, ExecutableOnPath(candidate), allocation)
                 | _ => all {
                     calls.get(id).phase == Ready,
                     changeCall(id, stop(resolved, SavedItf, ExecutableLookupFailed({
@@ -664,15 +676,16 @@ module quint_connect {
         } else rejectRunRequest(id, RejectedActionPath)
     }
 
+  action startRequestedRunWithPath(
+    id: CallId, request: cli::CliRequest, drawnSeed: Seed, artifactRoot: str, selection: itf::Selection,
+    environment: PathEnvironment
+  ): bool =
+    startRequestedRunWithAllocation(id, request, drawnSeed, artifactRoot, selection, environment, ReservationSucceeded)
+
   action startRequestedRun(
     id: CallId, request: cli::CliRequest, drawnSeed: Seed, artifactRoot: str, selection: itf::Selection
   ): bool =
     startRequestedRunWithPath(id, request, drawnSeed, artifactRoot, selection, { directories: List(), observations: Map() })
-
-  action failReservation(id: CallId, seed: Seed, cause: str): bool = all {
-    calls.get(id).phase == Ready,
-    changeCall(id, stop(calls.get(id), SavedItf, WorkspaceFailed({ seed: seed, stage: Reserve, cause: cause }))),
-  }
 
   action startProcess(id: CallId): bool =
     match calls.get(id).phase {
@@ -1704,17 +1717,22 @@ module quint_connect {
       val history = calls.get(id).history
       history.indices().forall(index =>
         match history.nth(index) {
-          | WorkspaceReserved(g) =>
-            history.indices().forall(i =>
-              match history.nth(i) {
-                | CommandPrepared(plan) =>
-                  i < index and plan.command.workspace == g.workspace and plan.command.seed == g.seed and
-                    cli::quintCommand(plan.request, plan.drawnSeed) == cli::CommandReady(plan.command) and
-                    commandExpectation(plan.request.config) == g.expectation and
-                    executableMatchesPlan(history, i, plan.command, plan.target)
-                | _ => true
-              }
-            )
+          | CommandPrepared(plan) =>
+            cli::quintCommand(plan.request, plan.drawnSeed) == cli::CommandReady(plan.command) and
+              executableMatchesPlan(history, index, plan.command, plan.target) and
+              (if (history.indices().contains(index + 1))
+                match history.nth(index + 1) {
+                  | WorkspaceReserved(g) =>
+                    plan.command.workspace == g.workspace and plan.command.seed == g.seed and
+                      commandExpectation(plan.request.config) == g.expectation
+                  | FailureRecognized(error) =>
+                    match error {
+                      | WorkspaceFailed(problem) => problem.stage == Reserve and problem.seed == plan.command.seed
+                      | _ => false
+                    }
+                  | _ => false
+                }
+              else false)
           | PathSearchCompleted(lookup) =>
             lookup.result == path::searchPath(lookup.callerDirectory, lookup.name,
               lookup.environment.directories, lookup.environment.observations)
@@ -2038,7 +2056,9 @@ module quint_connect {
           sampleSeed, defaultArtifactRoot, { ...defaultSelection, statePath: List(List(105, 116, 101, 109, 115)) }),
         startRequestedRun(id, simulatorRequest(workspace, cli::NamedTestMode({ name: List(97), maxSamples: cli::CliDefault })),
           sampleSeed, defaultArtifactRoot, { actionPath: List(List(100, 105, 115, 112, 97, 116, 99, 104)), statePath: List(List(105, 116, 101, 109, 115)) }),
-        failReservation(id, sampleSeed, "temporary directory unavailable"),
+        startRequestedRunWithAllocation(id, simulatorRequest(workspace, simulationWithCount(1)),
+          sampleSeed, defaultArtifactRoot, defaultSelection, { directories: List(), observations: Map() },
+          ReservationFailed("temporary directory unavailable")),
         startProcess(id),
         failSpawn(id, "could not start Quint"),
         completeProcessSuccess(id, List()),
