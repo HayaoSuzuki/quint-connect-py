@@ -202,8 +202,11 @@ module quint_cli {
     }
   }
 
-  // The filesystem adapter lists files in the workspace and supplies a basename
-  // as characters and its associated trace identity.
+  // The adapter classifies each workspace entry without following symlinks.
+  type GeneratedEntryKind = RegularFile | Directory | Symlink | Other
+  type GeneratedEntry = { name: List[str], trace: int, kind: GeneratedEntryKind }
+
+  // A basename and its associated trace identity for an already classified regular file.
   type GeneratedFile = { name: List[str], trace: int }
   type OutputSequence = GeneratedSequence(List[str]) | UnrelatedName
   type SequencedFile = { sequence: List[str], trace: int }
@@ -244,4 +247,8 @@ module quint_cli {
     )
     sorted.foldl(List(), (traces, file) => traces.append(file.trace))
   }
+
+  pure def orderedGeneratedEntries(entries: List[GeneratedEntry]): List[int] =
+    orderedGeneratedTraces(entries.select(entry => entry.kind == RegularFile)
+      .foldl(List(), (files, entry) => files.append({ name: entry.name, trace: entry.trace })))
 }

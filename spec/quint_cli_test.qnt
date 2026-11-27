@@ -331,6 +331,19 @@ module quint_cli_test {
     }
   }
 
+  run generatedTraceCandidatesRequireRegularEntriesAndCanonicalBasenamesTest = {
+    val first = { name: generatedFilename(List("0")), trace: 42, kind: RegularFile }
+    val later = { name: generatedFilename(List("1", "0")), trace: 91, kind: RegularFile }
+    val directory = { name: generatedFilename(List("1")), trace: 1, kind: Directory }
+    val symlink = { name: generatedFilename(List("2")), trace: 2, kind: Symlink }
+    val special = { name: generatedFilename(List("3")), trace: 3, kind: Other }
+    val leadingZero = { name: generatedFilename(List("0", "4")), trace: 4, kind: RegularFile }
+    and {
+      orderedGeneratedEntries(List(later, directory, symlink, special, leadingZero, first)) == List(42, 91),
+      orderedGeneratedEntries(List(directory, symlink, special, leadingZero)) == List(),
+    }
+  }
+
   run veryLongFileSequencesSortWithoutIntegerConversionTest = {
     val digits = range(0, 21).foldl(List(), (acc, _) => acc.append("9"))
     val large = { name: generatedFilename(digits), trace: 1 }
