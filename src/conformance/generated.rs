@@ -70,7 +70,7 @@ impl Worker {
 type SharedArtifacts = Arc<Mutex<BTreeMap<PathBuf, Option<Json>>>>;
 
 struct GeneratedRun {
-    driver: SavedReplay,
+    script: Rc<RefCell<Script>>,
     workspace: u64,
     root: String,
     request: Json,
@@ -88,10 +88,10 @@ struct Produced {
 
 impl GeneratedRun {
     fn response(&self, tags: &[&str]) -> Json {
-        self.driver.script.borrow_mut().receive(tags)
+        self.script.borrow_mut().receive(tags)
     }
     fn record(&self, tag: &str, value: Json) {
-        self.driver.script.borrow_mut().event(tag, value);
+        self.script.borrow_mut().event(tag, value);
     }
     fn workspace_path(&self) -> PathBuf {
         PathBuf::from(format!("/workspace/{}", self.workspace))
@@ -112,23 +112,12 @@ impl GeneratedRun {
         }
     }
 
-    fn position(&self, trace: &TraceFile) -> Json {
-        json!({"trace": self.ids[&trace.path], "traceIndex": trace.index})
-    }
-
-    fn trace_details(&self, trace: &TraceFile) -> Json {
-        json!({
-            "basename": trace.path.file_name().unwrap().to_str().unwrap(),
-            "path": self.working_path(self.ids[&trace.path]),
-            "position": self.position(trace),
-        })
-    }
-
-    fn working_path(&self, trace: u64) -> Json {
-        tagged(
-            "WorkingFile",
-            json!({"trace": trace, "workspace": self.workspace}),
-        )
+    fn fixture_trace<'a>(&self, trace: &'a TraceFile) -> FixtureTrace<'a> {
+        FixtureTrace::Generated {
+            trace,
+            id: self.ids[&trace.path],
+            workspace: self.workspace,
+        }
     }
 
     fn generation_event(&self, result: &Json, basenames: &[Json]) {
@@ -138,10 +127,6 @@ impl GeneratedRun {
                 "result": result, "basenames": {"#map": basenames}, "generation": self.generation,
             }),
         );
-    }
-
-    fn step_position(&self, trace: &TraceFile, index: usize) -> Json {
-        json!({"trace": self.position(trace), "stepIndex": index})
     }
 
     fn evidence_path(&self, trace: u64, directory: &Path) -> Json {
@@ -192,41 +177,13 @@ impl ReplayEnvironment for GeneratedRun {
     }
 
     fn create_driver(&mut self) -> Result<ScriptedDriver, String> {
-        self.driver.create_driver()
+        ScriptedDriver::create(&self.script)
     }
 
     fn event(&mut self, event: ReplayEvent<'_>) {
-        let mut script = self.driver.script.borrow_mut();
-        match event {
-            ReplayEvent::Read(trace) => {
-                script.event("GeneratedReadAttempted", self.trace_details(trace));
-            }
-            ReplayEvent::Factory(trace) => script.event("FactoryCalled", self.position(trace)),
-            ReplayEvent::DriverCreated(trace) => {
-                let driver = script.driver;
-                script.event(
-                    "DriverCreated",
-                    json!({"trace": self.position(trace), "driver": driver}),
-                );
-            }
-            ReplayEvent::Apply(trace, step, action) => {
-                let context =
-                    json!({"driver": script.driver, "position": self.step_position(trace, step)});
-                script.context = context.clone();
-                script.event(
-                    "OperationCalled",
-                    json!({"context": context, "operation": action_json(action)}),
-                );
-            }
-            ReplayEvent::Observe(trace, step, expected) => {
-                let context =
-                    json!({"driver": script.driver, "position": self.step_position(trace, step)});
-                script.event(
-                    "ObservationCalled",
-                    json!({"context": context, "expected": value_json(expected)}),
-                );
-            }
-        }
+        self.script
+            .borrow_mut()
+            .record_replay(event, |trace| self.fixture_trace(trace));
     }
 }
 
@@ -466,7 +423,7 @@ impl RunEnvironment for GeneratedRun {
                 self.record("ArtifactDirectoryTried", json!({"directory": directory_id(directory), "result": status, "root": self.root}));
             }
             RunEvent::ArtifactSaved(trace, result) => self.record("SaveAttempted",
-                json!({"position": self.position(trace), "result": self.save_result(trace, result)})),
+                json!({"position": self.fixture_trace(trace).position().json(), "result": self.save_result(trace, result)})),
             RunEvent::CleanupAttempted(result) => self.record("CleanupAttempted", json!({"workspace": self.workspace, "result": storage_json(result)})),
         }
     }
@@ -638,7 +595,7 @@ impl GeneratedRun {
                 };
                 tagged(
                     "TraceFailed",
-                    json!({"location": tagged("AtGeneratedTrace", self.trace_details(&trace)), "cause": cause}),
+                    json!({"location": tagged("AtGeneratedTrace", self.fixture_trace(&trace).read_details()), "cause": cause}),
                 )
             }
             Failure::Replay(ReplayError::FailedTrace(failure)) => {
@@ -647,8 +604,7 @@ impl GeneratedRun {
                 let artifacts = tagged("FromGeneration", json!({"seed": seed, "save": saved}));
                 match failure.problem {
                     TraceProblem::Mismatch(mismatch) => {
-                        let mut detail = mismatch_json(trace, &mismatch);
-                        detail["position"] = self.step_position(trace, mismatch.step_index);
+                        let detail = mismatch_json(self.fixture_trace(trace), &mismatch);
                         tagged(
                             "StatesDiffer",
                             json!({"detail": detail, "artifacts": artifacts}),
@@ -656,14 +612,16 @@ impl GeneratedRun {
                     }
                     TraceProblem::Driver { site, cause } => {
                         let location = site.step_index().map_or_else(
-                            || tagged("AtTrace", self.position(trace)),
-                            |index| tagged("AtStep", self.step_position(trace, index)),
+                            || tagged("AtTrace", self.fixture_trace(trace).position().json()),
+                            |index| {
+                                tagged("AtStep", self.fixture_trace(trace).position().step(index))
+                            },
                         );
                         let detail = json!({"location": location, "stage": driver_stage(site), "cause": *cause});
                         tagged(
                             "GeneratedDriverFailed",
                             json!({
-                                "position": self.position(trace), "detail": detail, "artifacts": artifacts,
+                                "position": self.fixture_trace(trace).position().json(), "detail": detail, "artifacts": artifacts,
                             }),
                         )
                     }
@@ -705,10 +663,7 @@ fn spawn_worker(call_id: u64, start: Json, artifacts: SharedArtifacts) -> Worker
             ..Script::default()
         }));
         let mut environment = GeneratedRun {
-            driver: SavedReplay {
-                files: BTreeMap::new(),
-                script: Rc::clone(&script),
-            },
+            script: Rc::clone(&script),
             workspace: number(&start["cli"]["workspace"]),
             root: string(&start["artifactRoot"]),
             request: start["cli"].clone(),
@@ -729,7 +684,7 @@ fn spawn_worker(call_id: u64, start: Json, artifacts: SharedArtifacts) -> Worker
         let report = json!({
             "call": {"call_id": call_id, "events": script.borrow().events, "outcome": environment.outcome(result)},
             "workspace_files": environment.output.values().map(|file|
-                json!({"path": environment.working_path(file.trace), "bytes": file.bytes})).collect::<Vec<_>>(),
+                json!({"path": working_path(environment.workspace, file.trace), "bytes": file.bytes})).collect::<Vec<_>>(),
         });
         notice.send(Pending::Finished(report)).unwrap();
     });

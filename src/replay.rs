@@ -114,6 +114,7 @@ pub enum ReplayError<E> {
     not(test),
     allow(dead_code, reason = "the model adapter consumes events in tests")
 )]
+#[derive(Clone, Copy)]
 pub enum ReplayEvent<'a> {
     Read(&'a TraceFile),
     Factory(&'a TraceFile),
