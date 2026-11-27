@@ -4,7 +4,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Protocol, cast, overload
+from typing import Protocol, TypedDict, cast, overload
 
 from . import _native
 from ._enums import Backend, DriverStage, QuintStage, WorkspaceStage
@@ -119,6 +119,33 @@ class NamedTest(_ModelConfig):
     test: str = field(kw_only=True)
 
 
+class _SelectionPaths(TypedDict):
+    action_path: Sequence[str]
+    state_path: Sequence[str]
+
+
+class _SimulationMode(TypedDict):
+    init: str | None
+    step: str | None
+    n_traces: int
+    max_steps: int | None
+
+
+class _NamedTestMode(TypedDict):
+    test: str
+
+
+class _RunRequest(TypedDict):
+    spec: FilePath
+    quint: FilePath
+    main: str | None
+    max_samples: int | None
+    mode: _SimulationMode | _NamedTestMode
+    seed: int | None
+    backend: str | None
+    artifact_dir: FilePath | None
+
+
 def _unsigned(name: str, value: int | None) -> int | None:
     if value is None:
         return None
@@ -178,11 +205,8 @@ def replay(
     paths = (
         [cast("FilePath", traces)] if isinstance(traces, (str, PathLike)) else traces
     )
-    _native.replay(
-        paths,
-        _context_factory(driver_factory, driver_context),
-        (action_path, state_path),
-    )
+    selection: _SelectionPaths = {"action_path": action_path, "state_path": state_path}
+    _native.replay(paths, _context_factory(driver_factory, driver_context), selection)
 
 
 @overload
@@ -237,24 +261,26 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
         if traces is None:
             message = "n_traces must be an integer"
             raise ValueError(message)
-        mode = None
-        options = (
-            config.init,
-            config.step,
-            traces,
-            _unsigned("max_steps", config.max_steps),
-        )
+        mode: _SimulationMode | _NamedTestMode = {
+            "init": config.init,
+            "step": config.step,
+            "n_traces": traces,
+            "max_steps": _unsigned("max_steps", config.max_steps),
+        }
     elif isinstance(config, NamedTest):
-        mode = config.test
-        options = None
+        mode = _NamedTestMode(test=config.test)
     else:
         message = "config must be Simulation or NamedTest"
         raise TypeError(message)
-    _native.run(
-        (config.spec, config.main, _unsigned("max_samples", config.max_samples)),
-        mode,
-        options,
-        _context_factory(driver_factory, driver_context),
-        (quint, seed, None if backend is None else backend.value, artifact_dir),
-        (action_path, state_path),
-    )
+    request: _RunRequest = {
+        "spec": config.spec,
+        "quint": quint,
+        "main": config.main,
+        "max_samples": _unsigned("max_samples", config.max_samples),
+        "mode": mode,
+        "seed": seed,
+        "backend": None if backend is None else backend.value,
+        "artifact_dir": artifact_dir,
+    }
+    selection: _SelectionPaths = {"action_path": action_path, "state_path": state_path}
+    _native.run(request, _context_factory(driver_factory, driver_context), selection)

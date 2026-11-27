@@ -2,11 +2,10 @@ from collections.abc import Sequence
 from os import PathLike
 from pathlib import Path
 
-from . import Action, QuintValue, _DriverContextFactory
+from . import Action, QuintValue, _DriverContextFactory, _RunRequest, _SelectionPaths
 from ._enums import DriverStage, QuintStage, WorkspaceStage
 
 type _Path = str | PathLike[str]
-type _Selection = tuple[Sequence[str], Sequence[str]]
 
 class InvalidTraceError(Exception):
     trace_path: Path
@@ -76,15 +75,12 @@ class IncompleteGenerationError(Exception):
 def replay(
     paths: Sequence[_Path],
     context_factory: _DriverContextFactory,
-    selection: _Selection,
+    selection: _SelectionPaths,
     /,
 ) -> None: ...
 def run(
-    common: tuple[_Path, str | None, int | None],
-    named_test: str | None,
-    simulation: tuple[str | None, str | None, int, int | None] | None,
+    request: _RunRequest,
     context_factory: _DriverContextFactory,
-    execution: tuple[_Path, int | None, str | None, _Path | None],
-    selection: _Selection,
+    selection: _SelectionPaths,
     /,
 ) -> None: ...
