@@ -47,7 +47,12 @@ module quint_cli {
     argv: List[CliArgument],
   }
 
-  type CommandResult = CommandReady(QuintCommand) | InvalidSeed | InvalidTraceCount
+  type CommandResult =
+    | CommandReady(QuintCommand)
+    | InvalidSeed
+    | InvalidTraceCount
+    | InvalidSampleLimit
+    | InvalidStepLimit
 
   pure val decimalDigitValues: str -> int = Map(
     "0" -> 0, "1" -> 1, "2" -> 2, "3" -> 3, "4" -> 4,
@@ -94,6 +99,12 @@ module quint_cli {
       | CliSpecified(value) => value
     }
 
+  pure def limitAtLeast(option: CliOption[int], minimum: int): bool =
+    match option {
+      | CliDefault => true
+      | CliSpecified(value) => value >= minimum
+    }
+
   pure def optionArgument(option: CliOption[a], encode: (a) => CliArgument): List[CliArgument] =
     match option {
       | CliDefault => List()
@@ -128,6 +139,8 @@ module quint_cli {
           val nTraces = optionOr(options.nTraces, 1)
           val maxSamples = optionOr(options.maxSamples, nTraces)
           if (nTraces <= 0) InvalidTraceCount
+          else if (maxSamples < nTraces) InvalidSampleLimit
+          else if (not(limitAtLeast(options.maxSteps, 0))) InvalidStepLimit
           else CommandReady({
             executable: request.executable,
             workspace: request.workspace,
@@ -143,17 +156,19 @@ module quint_cli {
               )),
           })
         }
-        | NamedTestMode(options) => CommandReady({
-          executable: request.executable,
-          workspace: request.workspace,
-          seed: seed,
-          argv: List(LiteralArgument("test"), LiteralArgument(request.model))
-            .concat(common)
-            .append(MatchOption(exactTestPattern(options.name)))
-            .concat(optionArgument(options.maxSamples, value =>
-              IntegerOption({ flag: "--max-samples", value: value })
-            )),
-        })
+        | NamedTestMode(options) =>
+          if (not(limitAtLeast(options.maxSamples, 1))) InvalidSampleLimit
+          else CommandReady({
+            executable: request.executable,
+            workspace: request.workspace,
+            seed: seed,
+            argv: List(LiteralArgument("test"), LiteralArgument(request.model))
+              .concat(common)
+              .append(MatchOption(exactTestPattern(options.name)))
+              .concat(optionArgument(options.maxSamples, value =>
+                IntegerOption({ flag: "--max-samples", value: value })
+              )),
+          })
       }
     }
   }

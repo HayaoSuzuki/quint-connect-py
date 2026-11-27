@@ -91,7 +91,7 @@ module quint_cli_test {
     val request = {
       ...baseRequest,
       backend: CliSpecified(RustBackend),
-      config: NamedTestMode({ name: List(65, 46, 91, 98, 93), maxSamples: CliSpecified(17) }),
+      config: NamedTestMode({ name: List(65, 46, 91, 98, 93), maxSamples: CliSpecified(1) }),
     }
     quintCommand(request, List("5")) == CommandReady({
       executable: baseRequest.executable,
@@ -104,7 +104,7 @@ module quint_cli_test {
         SeedOption(List("5")),
         StringOption({ flag: "--backend", value: "rust" }),
         MatchOption(List(94, 65, 92, 46, 92, 91, 98, 92, 93, 36)),
-        IntegerOption({ flag: "--max-samples", value: 17 }),
+        IntegerOption({ flag: "--max-samples", value: 1 }),
       ),
     })
   }
@@ -157,11 +157,71 @@ module quint_cli_test {
     }
   }
 
-  run zeroTraceCountIsInvalidTest =
+  run nonPositiveTraceCountIsInvalidTest =
+    Set(-1, 0).forall(count =>
+      quintCommand({
+        ...baseRequest,
+        config: Simulation({ ...defaultSimulation, nTraces: CliSpecified(count) }),
+      }, List("0")) == InvalidTraceCount
+    )
+
+  run simulationRejectsSampleLimitBelowTraceCountTest =
+    Set(-1, 0, 1).forall(limit =>
+      quintCommand({
+        ...baseRequest,
+        config: Simulation({ ...defaultSimulation, nTraces: CliSpecified(2), maxSamples: CliSpecified(limit) }),
+      }, List("0")) == InvalidSampleLimit
+    )
+
+  run simulationAcceptsSampleLimitEqualToTraceCountTest = {
+    val options = {
+      ...defaultSimulation,
+      nTraces: CliSpecified(2),
+      maxSamples: CliSpecified(2),
+      maxSteps: CliSpecified(1),
+    }
+    match quintCommand({ ...baseRequest, config: Simulation(options) }, List("0")) {
+      | CommandReady(command) =>
+        command.argv.slice(5, command.argv.length()) == List(
+          IntegerOption({ flag: "--n-traces", value: 2 }),
+          IntegerOption({ flag: "--max-samples", value: 2 }),
+          IntegerOption({ flag: "--max-steps", value: 1 }),
+        )
+      | _ => false
+    }
+  }
+
+  run namedTestRejectsNonPositiveSampleLimitTest =
+    Set(-1, 0).forall(limit =>
+      quintCommand({
+        ...baseRequest,
+        config: NamedTestMode({ name: List(65), maxSamples: CliSpecified(limit) }),
+      }, List("0")) == InvalidSampleLimit
+    )
+
+  run simulationRejectsNegativeStepLimitTest =
     quintCommand({
       ...baseRequest,
-      config: Simulation({ ...defaultSimulation, nTraces: CliSpecified(0) }),
-    }, List("0")) == InvalidTraceCount
+      config: Simulation({ ...defaultSimulation, maxSteps: CliSpecified(-1) }),
+    }, List("0")) == InvalidStepLimit
+
+  run simulationValidatesSeedAndLimitsInOrderTest = {
+    val options = {
+      ...defaultSimulation,
+      nTraces: CliSpecified(0),
+      maxSamples: CliSpecified(-1),
+      maxSteps: CliSpecified(-1),
+    }
+    val request = { ...baseRequest, config: Simulation(options) }
+    and {
+      quintCommand(request, List()) == InvalidSeed,
+      quintCommand(request, List("0")) == InvalidTraceCount,
+      quintCommand({
+        ...request,
+        config: Simulation({ ...options, nTraces: CliSpecified(2) }),
+      }, List("0")) == InvalidSampleLimit,
+    }
+  }
 
   run generatedFilesAreFilteredAndNumericallyOrderedTest = {
     val zero = { name: generatedFilename(List("0")), trace: 42 }

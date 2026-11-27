@@ -160,7 +160,12 @@ module quint_connect {
 
   type WorkspaceStage = Reserve | Cleanup
 
-  type RequestProblem = RejectedSeed | RejectedTraceCount | RejectedActionPath
+  type RequestProblem =
+    | RejectedSeed
+    | RejectedTraceCount
+    | RejectedActionPath
+    | RejectedSampleLimit
+    | RejectedStepLimit
 
   type Failure =
     | InvalidRequest(RequestProblem)
@@ -485,6 +490,8 @@ module quint_connect {
     match cli::quintCommand(request, drawnSeed) {
       | InvalidSeed => rejectRunRequest(id, RejectedSeed)
       | InvalidTraceCount => rejectRunRequest(id, RejectedTraceCount)
+      | InvalidSampleLimit => rejectRunRequest(id, RejectedSampleLimit)
+      | InvalidStepLimit => rejectRunRequest(id, RejectedStepLimit)
       | CommandReady(command) =>
         if (hasActionSource(request.config, selection)) {
           val requestState = { ...calls.get(id), selection: selection }
