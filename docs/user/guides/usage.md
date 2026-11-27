@@ -1,6 +1,17 @@
 # Generate and replay Quint traces
 
-Import `quint_connect` on Python 3.14 or 3.15.
+## Install with uv
+
+Create a virtual environment with CPython 3.14 or 3.15 and install the package.
+
+```sh
+uv venv --python 3.14
+uv pip install quint-connect-py
+```
+
+Import `quint_connect` in that environment. In an existing uv project whose
+supported Python versions are within the package's range, use
+`uv add --dev quint-connect-py` to add it as a test dependency.
 
 ## Write a driver
 

@@ -2,10 +2,11 @@
 
 Run Quint model traces against Python code.
 
-Install on CPython 3.14 or 3.15.
+Install with uv on CPython 3.14 or 3.15.
 
 ```sh
-python -m pip install quint-connect-py
+uv venv --python 3.14
+uv pip install quint-connect-py
 ```
 
 Prebuilt wheels are available for Linux x86-64 (manylinux), macOS ARM64, and
