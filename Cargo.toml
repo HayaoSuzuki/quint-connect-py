@@ -1,6 +1,6 @@
 [package]
 name = "quint-connect-py"
-version = "0.2.0"
+version = "0.2.1"
 description = "Replay Quint model traces against Python code"
 repository = "https://github.com/HayaoSuzuki/quint-connect-py"
 readme = "README.md"
