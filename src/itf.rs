@@ -1,29 +1,29 @@
 mod json;
 
 use self::json::{Document, Node, NodeId};
-use crate::value::Value;
+use crate::value::{Value, with_stack};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Selection {
-    pub(crate) action_path: Vec<String>,
-    pub(crate) state_path: Vec<String>,
+pub struct Selection {
+    pub action_path: Vec<String>,
+    pub state_path: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Action {
-    pub(crate) name: String,
-    pub(crate) arguments: BTreeMap<String, Value>,
+pub struct Action {
+    pub name: String,
+    pub arguments: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct TraceStep {
-    pub(crate) action: Action,
-    pub(crate) expected: Value,
+pub struct TraceStep {
+    pub action: Action,
+    pub expected: Value,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ItfError {
+pub enum ItfError {
     Empty,
     Invalid {
         step: Option<usize>,
@@ -32,10 +32,7 @@ pub(crate) enum ItfError {
 }
 
 /// Decode an entire trace before a driver is allowed to perform an operation.
-pub(crate) fn decode_trace(
-    bytes: &[u8],
-    selection: &Selection,
-) -> Result<Vec<TraceStep>, ItfError> {
+pub fn decode_trace(bytes: &[u8], selection: &Selection) -> Result<Vec<TraceStep>, ItfError> {
     let invalid = |cause| ItfError::Invalid { step: None, cause };
     let text = std::str::from_utf8(bytes).map_err(|_| invalid("invalid UTF-8"))?;
     let doc = Document::parse(text).map_err(|error| match error {
@@ -179,6 +176,10 @@ fn pick_path(doc: &Document, start: NodeId, path: &[String]) -> Option<NodeId> {
 
 /// A fixture or trace value uses exactly the same decoding and normalization rules.
 fn decode_value(doc: &Document, id: NodeId) -> Option<Value> {
+    with_stack(|| decode_node(doc, id))
+}
+
+fn decode_node(doc: &Document, id: NodeId) -> Option<Value> {
     match &doc.nodes[id] {
         Node::Bool(value) => Some(Value::Bool(*value)),
         Node::Text(text) => Some(Value::Text(text.clone())),
@@ -244,7 +245,7 @@ fn decode_value(doc: &Document, id: NodeId) -> Option<Value> {
 }
 
 #[cfg(test)]
-pub(crate) fn fixture_value(text: &str) -> Option<Value> {
+pub fn fixture_value(text: &str) -> Option<Value> {
     let doc = Document::parse(text).ok()?;
     decode_value(&doc, doc.root)
 }

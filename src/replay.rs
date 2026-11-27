@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::itf::{Action, ItfError, Selection, TraceStep, decode_trace};
 use crate::value::Value;
 
-pub(crate) trait Driver {
+pub trait Driver {
     type Error;
 
     fn apply(&mut self, action: &Action) -> Result<(), Self::Error>;
@@ -12,13 +12,13 @@ pub(crate) trait Driver {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TraceFile {
-    pub(crate) path: PathBuf,
-    pub(crate) display_path: PathBuf,
-    pub(crate) index: usize,
+pub struct TraceFile {
+    pub path: PathBuf,
+    pub display_path: PathBuf,
+    pub index: usize,
 }
 
-pub(crate) fn saved_files(paths: &[PathBuf], caller: &Path) -> Vec<TraceFile> {
+pub fn saved_files(paths: &[PathBuf], caller: &Path) -> Vec<TraceFile> {
     paths
         .iter()
         .enumerate()
@@ -31,30 +31,30 @@ pub(crate) fn saved_files(paths: &[PathBuf], caller: &Path) -> Vec<TraceFile> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DriverStage {
+pub enum DriverStage {
     Factory,
     Apply,
     Observe,
 }
 
 #[derive(Debug)]
-pub(crate) struct Mismatch {
-    pub(crate) trace: TraceFile,
-    pub(crate) step_index: usize,
-    pub(crate) step: TraceStep,
-    pub(crate) actual: Value,
+pub struct Mismatch {
+    pub trace: TraceFile,
+    pub step_index: usize,
+    pub step: TraceStep,
+    pub actual: Value,
     // The bytes that were decoded and replayed, retained for evidence.
-    pub(crate) bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Debug)]
-pub(crate) enum TraceCause {
+pub enum TraceCause {
     Read(io::Error),
     Decode(&'static str),
 }
 
 #[derive(Debug)]
-pub(crate) enum ReplayError<E> {
+pub enum ReplayError<E> {
     NoInput,
     NoStates(TraceFile),
     InvalidTrace {
@@ -66,12 +66,16 @@ pub(crate) enum ReplayError<E> {
         trace: TraceFile,
         step: Option<usize>,
         stage: DriverStage,
-        cause: E,
+        cause: Box<E>,
     },
     Mismatch(Box<Mismatch>),
 }
 
-pub(crate) enum ReplayEvent<'a> {
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the model adapter consumes events in tests")
+)]
+pub enum ReplayEvent<'a> {
     Read(&'a TraceFile),
     Factory(&'a TraceFile),
     DriverCreated(&'a TraceFile),
@@ -79,7 +83,7 @@ pub(crate) enum ReplayEvent<'a> {
     Observe(&'a TraceFile, usize, &'a Value),
 }
 
-pub(crate) trait ReplayEnvironment {
+pub trait ReplayEnvironment {
     type Driver: Driver;
 
     fn read(&mut self, trace: &TraceFile) -> io::Result<Vec<u8>>;
@@ -87,9 +91,9 @@ pub(crate) trait ReplayEnvironment {
     fn event(&mut self, _: ReplayEvent<'_>) {}
 }
 
-pub(crate) struct FileReplay<F>(pub(crate) F);
+pub struct LocalEnvironment<F>(pub F);
 
-impl<D: Driver, F: FnMut() -> Result<D, D::Error>> ReplayEnvironment for FileReplay<F> {
+impl<D: Driver, F: FnMut() -> Result<D, D::Error>> ReplayEnvironment for LocalEnvironment<F> {
     type Driver = D;
 
     fn read(&mut self, trace: &TraceFile) -> io::Result<Vec<u8>> {
@@ -102,7 +106,7 @@ impl<D: Driver, F: FnMut() -> Result<D, D::Error>> ReplayEnvironment for FileRep
 }
 
 /// Reads and validates one trace at a time and retains the bytes of the first mismatch.
-pub(crate) fn replay<E: ReplayEnvironment>(
+pub fn replay<E: ReplayEnvironment>(
     files: &[TraceFile],
     selection: &Selection,
     environment: &mut E,
@@ -131,7 +135,7 @@ pub(crate) fn replay<E: ReplayEnvironment>(
             trace: trace.clone(),
             step,
             stage,
-            cause,
+            cause: Box::new(cause),
         };
         environment.event(ReplayEvent::Factory(trace));
         let mut driver = environment
@@ -192,7 +196,7 @@ mod tests {
         .unwrap();
         let files = saved_files(&[path], directory.path());
         let mut factories = 0;
-        let mut environment = FileReplay(|| {
+        let mut environment = LocalEnvironment(|| {
             factories += 1;
             Ok(TrueDriver)
         });
@@ -228,7 +232,7 @@ mod tests {
             ..Selection::default()
         };
         let mut factories = 0;
-        let mut environment = FileReplay(|| {
+        let mut environment = LocalEnvironment(|| {
             factories += 1;
             Ok(TrueDriver)
         });

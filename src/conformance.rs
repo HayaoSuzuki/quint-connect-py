@@ -4,6 +4,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+mod generated;
+
 use serde_json::{Value as Json, json};
 
 use crate::itf::{Action, Selection, fixture_value};
@@ -16,7 +18,11 @@ use crate::value::Value;
 const FIXTURES: &str = include_str!("../spec/fixtures/runner-conformance.json");
 
 fn tagged(tag: &str, value: Json) -> Json {
-    json!({"tag": tag, "value": value})
+    Json::Object(
+        [("tag".into(), json!(tag)), ("value".into(), value)]
+            .into_iter()
+            .collect(),
+    )
 }
 
 fn unit(tag: &str) -> Json {
@@ -70,21 +76,26 @@ fn path(trace: &TraceFile) -> Json {
 }
 
 fn location(trace: &TraceFile, step: Option<usize>) -> Json {
-    match step {
-        Some(step) => tagged(
-            "AtSavedStep",
-            json!({"path": path(trace), "position": step_position(trace, step)}),
-        ),
-        None => tagged(
-            "AtSavedTrace",
-            json!({"path": path(trace), "position": position(trace)}),
-        ),
-    }
+    step.map_or_else(
+        || {
+            tagged(
+                "AtSavedTrace",
+                json!({"path": path(trace), "position": position(trace)}),
+            )
+        },
+        |step| {
+            tagged(
+                "AtSavedStep",
+                json!({"path": path(trace), "position": step_position(trace, step)}),
+            )
+        },
+    )
 }
 
 #[derive(Default)]
 struct Script {
     responses: VecDeque<Json>,
+    link: Option<generated::Link>,
     events: Vec<Json>,
     driver: u64,
     context: Json,
@@ -92,6 +103,9 @@ struct Script {
 
 impl Script {
     fn receive(&mut self, tags: &[&str]) -> Json {
+        if let Some(link) = &self.link {
+            return link.receive(tags);
+        }
         let response = self
             .responses
             .pop_front()
@@ -105,7 +119,7 @@ impl Script {
         self.events.push(tagged(tag, content));
     }
 
-    fn step_context(&mut self, trace: &TraceFile, step: usize) -> Json {
+    fn step_context(&self, trace: &TraceFile, step: usize) -> Json {
         json!({"driver": self.driver, "position": step_position(trace, step)})
     }
 }
@@ -269,7 +283,7 @@ fn outcome(result: Result<(), ReplayError<String>>) -> Json {
             };
             tagged(
                 "DriverFailed",
-                json!({"location": location(&trace, step), "stage": unit(stage), "cause": cause}),
+                json!({"location": location(&trace, step), "stage": unit(stage), "cause": *cause}),
             )
         }
         Err(ReplayError::Mismatch(mismatch)) => tagged(
