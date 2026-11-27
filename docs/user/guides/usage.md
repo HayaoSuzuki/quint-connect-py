@@ -14,7 +14,7 @@ from quint_connect import replay
 replay("counter.itf.json", CounterDriver, state_path=("count",))
 ```
 
-この例では、トレースの各状態から `count` を取り出して `observe()` の戻り値と比較する。`CounterDriver` はテスト対象に合わせて用意する。保存済み ITF の再生には Python 環境を使う。
+この例では、トレースの各状態から `count` を取り出して `observe()` の戻り値と比較する。`CounterDriver` はテスト対象に合わせて用意する。保存済み ITF は、対応する wheel をインストールした Python 環境でオフライン再生できる。
 
 ## Quint で生成
 
