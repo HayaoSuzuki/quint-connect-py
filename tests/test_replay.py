@@ -1,8 +1,10 @@
 import json
+import logging
 import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from types import TracebackType
 from typing import override
 
 import pytest
@@ -15,6 +17,7 @@ from quint_connect import (
     EmptyTraceError,
     InvalidTraceError,
     QuintValue,
+    StateComparison,
     StateMismatchError,
     replay,
 )
@@ -42,6 +45,128 @@ class ConstantDriver:
 
     def observe(self) -> QuintValue:
         return self.value
+
+
+def test_replay_without_observation(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state({"#unserializable": "Int"})])
+    calls: list[str] = []
+
+    class ActionDriver:
+        def step(self, action: Action, /) -> None:
+            calls.append(action.name)
+
+    replay(path, ActionDriver, comparison=None)
+
+    assert calls == ["init"]
+
+
+def test_operation_only_still_validates_operations_before_creation(
+    tmp_path: Path,
+) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True), {"state": True}])
+
+    def factory() -> ConstantDriver:
+        pytest.fail("invalid operations must be rejected before creating a driver")
+
+    with pytest.raises(InvalidTraceError) as caught:
+        replay(path, factory, comparison=None)
+
+    assert caught.value.step_index == 1
+
+
+def test_replay_transforms_expected_state(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state("MODEL")])
+
+    def lower(value: QuintValue) -> str:
+        assert isinstance(value, str)
+        return value.lower()
+
+    replay(
+        path,
+        lambda: ConstantDriver("model"),
+        state_path=("state",),
+        comparison=StateComparison(transform_expected=lower),
+    )
+
+
+def test_replay_uses_custom_equality(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state({"#bigint": "10"})])
+
+    def near(expected: QuintValue, actual: QuintValue) -> bool:
+        assert type(expected) is int
+        assert type(actual) is int
+        return abs(expected - actual) <= 1
+
+    replay(
+        path,
+        lambda: ConstantDriver(11),
+        state_path=("state",),
+        comparison=StateComparison(equals=near),
+    )
+
+
+def test_mismatch_reports_the_values_used_by_the_comparator(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state("MODEL")])
+    comparison = StateComparison(
+        transform_expected=lambda _value: "model",
+        equals=lambda _expected, _actual: False,
+    )
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(
+            path,
+            lambda: ConstantDriver("model"),
+            state_path=("state",),
+            comparison=comparison,
+        )
+
+    assert caught.value.expected == "model"
+    assert caught.value.actual == "model"
+    assert caught.value.diff == ""
+
+
+def test_replay_preserves_comparison_exception(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    failure = RuntimeError("comparison failed")
+
+    def compare(_expected: QuintValue, _actual: QuintValue) -> bool:
+        raise failure
+
+    with pytest.raises(DriverError) as caught:
+        replay(
+            path,
+            lambda: ConstantDriver(True),
+            state_path=("state",),
+            comparison=StateComparison(equals=compare),
+        )
+
+    assert caught.value.stage is DriverStage.COMPARE
+    assert caught.value.step_index == 0
+    assert caught.value.__cause__ is failure
+
+
+def test_state_mismatch_displays_a_diff(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state({"answer": True})])
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, lambda: ConstantDriver({"answer": False}), state_path=("state",))
+
+    assert "-{'answer': True}" in caught.value.diff
+    assert "+{'answer': False}" in caught.value.diff
+    assert caught.value.diff in str(caught.value)
+
+
+def test_replay_logs_trace_step_and_observation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+
+    with caplog.at_level(logging.DEBUG, logger="quint_connect"):
+        replay(path, lambda: ConstantDriver(True), state_path=("state",))
+
+    assert any("trace 0" in message for message in caplog.messages)
+    assert any("step 0" in message and "init" in message for message in caplog.messages)
+    assert any("observed True" in message for message in caplog.messages)
 
 
 @given(st.integers(min_value=-(2**512), max_value=2**512))
@@ -146,6 +271,62 @@ def test_context_exits_before_the_next_trace(tmp_path: Path) -> None:
     assert events == ["enter", "exit", "enter", "exit"]
 
 
+def test_driver_context_uses_the_with_protocol(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    events: list[str] = []
+
+    class ShadowedContext:
+        def __init__(self) -> None:
+            self.__dict__["__enter__"] = lambda: pytest.fail("instance __enter__ ran")
+            self.__dict__["__exit__"] = lambda *_: pytest.fail("instance __exit__ ran")
+
+        def __enter__(self) -> ConstantDriver:
+            events.append("enter")
+            return ConstantDriver(True)
+
+        def __exit__(
+            self,
+            _exc_type: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: TracebackType | None,
+            /,
+        ) -> None:
+            events.append("exit")
+
+    replay(path, driver_context=ShadowedContext, state_path=("state",))
+
+    assert events == ["enter", "exit"]
+
+
+@pytest.mark.parametrize("stage", [DriverStage.FACTORY, DriverStage.EXIT])
+def test_driver_context_preserves_stop_iteration(
+    tmp_path: Path, stage: DriverStage
+) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    failure = StopIteration("context failed")
+
+    class FailingContext:
+        def __enter__(self) -> ConstantDriver:
+            if stage is DriverStage.FACTORY:
+                raise failure
+            return ConstantDriver(True)
+
+        def __exit__(
+            self,
+            _exc_type: type[BaseException] | None,
+            _error: BaseException | None,
+            _traceback: TracebackType | None,
+            /,
+        ) -> None:
+            raise failure
+
+    with pytest.raises(DriverError) as caught:
+        replay(path, driver_context=FailingContext, state_path=("state",))
+
+    assert caught.value.stage is stage
+    assert caught.value.__cause__ is failure
+
+
 def test_context_receives_driver_failure(tmp_path: Path) -> None:
     path = write_trace(tmp_path / "trace.itf.json", [state(True)])
     failure = RuntimeError("driver failed")
@@ -183,6 +364,49 @@ def test_context_exit_cannot_suppress_a_mismatch(tmp_path: Path) -> None:
         replay(path, driver_context=driver_context, state_path=("state",))
 
     assert caught.value.actual is False
+
+
+def test_context_preserves_notes_on_the_mismatch(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    received: list[StateMismatchError] = []
+
+    @contextmanager
+    def driver_context() -> Generator[ConstantDriver]:
+        try:
+            yield ConstantDriver(False)
+        except StateMismatchError as error:
+            received.append(error)
+            error.add_note("harness diagnostics")
+            raise
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, driver_context=driver_context, state_path=("state",))
+
+    assert caught.value is received[0]
+    assert caught.match("harness diagnostics")
+
+
+def test_exit_reraising_the_mismatch_is_not_a_cleanup_failure(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+
+    class ReraisingContext:
+        def __enter__(self) -> ConstantDriver:
+            return ConstantDriver(False)
+
+        def __exit__(
+            self,
+            _exc_type: type[BaseException] | None,
+            error: BaseException | None,
+            _traceback: TracebackType | None,
+            /,
+        ) -> None:
+            assert isinstance(error, StateMismatchError)
+            raise error
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, driver_context=ReraisingContext, state_path=("state",))
+
+    assert caught.value.driver_cleanup_error is None
 
 
 def test_context_exit_failure_preserves_the_mismatch(tmp_path: Path) -> None:

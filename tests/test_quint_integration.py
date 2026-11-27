@@ -12,11 +12,13 @@ from quint_connect import (
     DriverError,
     DriverStage,
     NamedTest,
+    NamedTests,
     QuintError,
     QuintMap,
     QuintStage,
     QuintValue,
     Simulation,
+    StateComparison,
     StateMismatchError,
     replay,
     run,
@@ -86,8 +88,41 @@ def test_counter_matches_named_test(backend: Backend) -> None:
     assert result is None
 
 
+@pytest.mark.parametrize("backend", [Backend.RUST, Backend.TYPESCRIPT])
+def test_named_tests_selects_multiple_traces(tmp_path: Path, backend: Backend) -> None:
+    model = tmp_path / "selection.qnt"
+    model.write_text(
+        """module selection {
+  var op: { tag: str, value: () }
+  action init = op' = { tag: "Reset", value: () }
+  run alphaTest = init.expect(op.tag == "Reset")
+  run betaTest = init.expect(op.tag == "Reset")
+  run unrelatedTest = init.expect(false)
+}""",
+        encoding="utf-8",
+    )
+    events: list[str] = []
+
+    class RecordingDriver:
+        def step(self, action: Action, /) -> None:
+            events.append(action.name)
+
+    run(
+        NamedTests(model, pattern="^(alpha|beta)Test$", max_samples=1),
+        RecordingDriver,
+        quint=quint_executable(),
+        backend=backend,
+        comparison=None,
+        action_path=("op",),
+        seed=42,
+    )
+
+    assert events == ["Reset", "Reset"]
+
+
 @pytest.mark.parametrize(
-    "stage", [DriverStage.FACTORY, DriverStage.APPLY, DriverStage.OBSERVE]
+    "stage",
+    [DriverStage.FACTORY, DriverStage.APPLY, DriverStage.OBSERVE, DriverStage.COMPARE],
 )
 def test_generated_driver_failure_saves_a_replayable_trace(
     tmp_path: Path, stage: DriverStage
@@ -113,6 +148,13 @@ def test_generated_driver_failure_saves_a_replayable_trace(
             raise failure
         return FailingDriver()
 
+    def equals(expected: QuintValue, actual: QuintValue) -> bool:
+        if stage is DriverStage.COMPARE:
+            raise failure
+        return expected == actual
+
+    comparison = StateComparison(equals=equals)
+
     with pytest.raises(DriverError) as caught:
         run(
             Simulation(MODEL, max_steps=2),
@@ -120,6 +162,7 @@ def test_generated_driver_failure_saves_a_replayable_trace(
             quint=quint_executable(),
             seed=42,
             artifact_dir=artifact_dir,
+            comparison=comparison,
             action_path=("op",),
             state_path=("count",),
         )
@@ -133,7 +176,13 @@ def test_generated_driver_failure_saves_a_replayable_trace(
     assert error.artifact_path.is_file()
     assert not error.trace_path.exists()
     with pytest.raises(DriverError) as saved:
-        replay(error.artifact_path, factory, action_path=("op",), state_path=("count",))
+        replay(
+            error.artifact_path,
+            factory,
+            action_path=("op",),
+            state_path=("count",),
+            comparison=comparison,
+        )
     assert saved.value.stage is stage
     assert saved.value.step_index == error.step_index
 
@@ -176,10 +225,20 @@ def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
         def observe(self) -> int:
             return 0
 
+    received: list[StateMismatchError] = []
+
+    @contextmanager
+    def driver_context() -> Generator[BrokenCounter]:
+        try:
+            yield BrokenCounter()
+        except StateMismatchError as error:
+            received.append(error)
+            raise
+
     with pytest.raises(StateMismatchError) as generated:
         run(
             config,
-            BrokenCounter,
+            driver_context=driver_context,
             quint=quint_executable(),
             seed=42,
             artifact_dir=artifact_dir,
@@ -187,6 +246,7 @@ def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
             state_path=("count",),
         )
 
+    assert generated.value is received[0]
     artifact = generated.value.artifact_path
     assert generated.value.artifact_error is None
     assert artifact is not None

@@ -16,6 +16,7 @@ class DriverStage(Enum):
     FACTORY = "factory"
     APPLY = "apply"
     OBSERVE = "observe"
+    COMPARE = "compare"
     EXIT = "exit"
 
 

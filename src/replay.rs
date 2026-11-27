@@ -1,3 +1,5 @@
+#[cfg(feature = "python")]
+use std::cell::OnceCell;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -9,7 +11,12 @@ pub trait Driver {
 
     fn apply(&mut self, action: &Action) -> Result<(), Self::Error>;
     fn observe(&mut self) -> Result<Value, Self::Error>;
-    /// Consumes the driver after replay, before another trace can start.
+    /// Returns the expected value used for diagnostics when the comparison fails.
+    fn compare(&mut self, expected: Value, actual: &Value) -> Result<Option<Value>, Self::Error> {
+        Ok((&expected != actual).then_some(expected))
+    }
+
+    /// Consumes the driver before advancing and may attach a language-specific error.
     fn finish(
         self,
         _trace: &TraceFile,
@@ -46,6 +53,7 @@ pub enum DriverFailureSite {
     Factory,
     Apply(usize),
     Observe(usize),
+    Compare(usize),
     Exit,
 }
 
@@ -53,7 +61,7 @@ impl DriverFailureSite {
     pub const fn step_index(self) -> Option<usize> {
         match self {
             Self::Factory | Self::Exit => None,
-            Self::Apply(index) | Self::Observe(index) => Some(index),
+            Self::Apply(index) | Self::Observe(index) | Self::Compare(index) => Some(index),
         }
     }
 }
@@ -61,7 +69,8 @@ impl DriverFailureSite {
 #[derive(Debug)]
 pub struct Mismatch {
     pub step_index: usize,
-    pub step: TraceStep,
+    pub action: Action,
+    pub expected: Value,
     pub actual: Value,
 }
 
@@ -71,7 +80,12 @@ pub enum TraceProblem<E> {
         site: DriverFailureSite,
         cause: Box<E>,
     },
-    Mismatch(Mismatch),
+    Mismatch {
+        detail: Box<Mismatch>,
+        // Carry the error shown during exit through final reporting.
+        #[cfg(feature = "python")]
+        presented: OnceCell<E>,
+    },
 }
 
 impl<E> TraceProblem<E> {
@@ -121,6 +135,8 @@ pub enum ReplayEvent<'a> {
     DriverCreated(&'a TraceFile),
     Apply(&'a TraceFile, usize, &'a Action),
     Observe(&'a TraceFile, usize, &'a Value),
+    #[cfg(feature = "python")]
+    Observed(&'a TraceFile, usize, &'a Value),
 }
 
 pub trait ReplayEnvironment {
@@ -131,7 +147,18 @@ pub trait ReplayEnvironment {
     fn event(&mut self, _: ReplayEvent<'_>) {}
 }
 
-pub struct LocalEnvironment<F>(pub F);
+pub type ReplayReporter = Box<dyn FnMut(ReplayEvent<'_>) + Send>;
+
+pub struct LocalEnvironment<F> {
+    factory: F,
+    reporter: Option<ReplayReporter>,
+}
+
+impl<F> LocalEnvironment<F> {
+    pub const fn new(factory: F, reporter: Option<ReplayReporter>) -> Self {
+        Self { factory, reporter }
+    }
+}
 
 impl<D: Driver, F: FnMut() -> Result<D, D::Error>> ReplayEnvironment for LocalEnvironment<F> {
     type Driver = D;
@@ -141,7 +168,13 @@ impl<D: Driver, F: FnMut() -> Result<D, D::Error>> ReplayEnvironment for LocalEn
     }
 
     fn create_driver(&mut self) -> Result<D, D::Error> {
-        (self.0)()
+        (self.factory)()
+    }
+
+    fn event(&mut self, event: ReplayEvent<'_>) {
+        if let Some(reporter) = self.reporter.as_mut() {
+            reporter(event);
+        }
     }
 }
 
@@ -223,16 +256,29 @@ fn replay_steps<E: ReplayEnvironment>(
         driver
             .apply(&step.action)
             .map_err(|cause| TraceProblem::driver(DriverFailureSite::Apply(index), cause))?;
-        environment.event(ReplayEvent::Observe(trace, index, &step.expected));
+        let Some(expected) = step.expected else {
+            continue;
+        };
+        environment.event(ReplayEvent::Observe(trace, index, &expected));
         let actual = driver
             .observe()
             .map_err(|cause| TraceProblem::driver(DriverFailureSite::Observe(index), cause))?;
-        if step.expected != actual {
-            return Err(TraceProblem::Mismatch(Mismatch {
-                step_index: index,
-                step,
-                actual,
-            }));
+        #[cfg(feature = "python")]
+        environment.event(ReplayEvent::Observed(trace, index, &actual));
+        if let Some(expected) = driver
+            .compare(expected, &actual)
+            .map_err(|cause| TraceProblem::driver(DriverFailureSite::Compare(index), cause))?
+        {
+            return Err(TraceProblem::Mismatch {
+                detail: Box::new(Mismatch {
+                    step_index: index,
+                    action: step.action,
+                    expected,
+                    actual,
+                }),
+                #[cfg(feature = "python")]
+                presented: OnceCell::new(),
+            });
         }
     }
     Ok(())
@@ -269,10 +315,13 @@ mod tests {
         .unwrap();
         let files = saved_files(&[path], directory.path());
         let mut factories = 0;
-        let mut environment = LocalEnvironment(|| {
-            factories += 1;
-            Ok(TrueDriver)
-        });
+        let mut environment = LocalEnvironment::new(
+            || {
+                factories += 1;
+                Ok(TrueDriver)
+            },
+            None,
+        );
 
         let error = replay(&files, &Selection::default(), &mut environment).unwrap_err();
 
@@ -301,14 +350,17 @@ mod tests {
         ];
         let files = saved_files(&paths, directory.path());
         let selection = Selection {
-            state_path: vec!["n".into()],
+            state_path: Some(vec!["n".into()]),
             ..Selection::default()
         };
         let mut factories = 0;
-        let mut environment = LocalEnvironment(|| {
-            factories += 1;
-            Ok(TrueDriver)
-        });
+        let mut environment = LocalEnvironment::new(
+            || {
+                factories += 1;
+                Ok(TrueDriver)
+            },
+            None,
+        );
 
         let result = replay(&files, &selection, &mut environment);
 

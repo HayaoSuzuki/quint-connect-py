@@ -659,6 +659,7 @@ module quint_connect {
     match config {
       | Simulation(options) => SimulationCount(cli::optionOr(options.nTraces, 1))
       | NamedTestMode(_) => NamedTestOutput
+      | PatternTestMode(_) => NamedTestOutput
     }
 
   action rejectRunRequest(id: CallId, problem: RequestProblem): bool = all {
@@ -670,6 +671,7 @@ module quint_connect {
     match config {
       | Simulation(_) => true
       | NamedTestMode(_) => selection.actionPath.length() > 0
+      | PatternTestMode(_) => selection.actionPath.length() > 0
     }
 
   action reservePlannedRun(

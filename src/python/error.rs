@@ -1,4 +1,4 @@
-use pyo3::exceptions::{PyAssertionError, PyException, PyValueError};
+use pyo3::exceptions::{PyAssertionError, PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -61,11 +61,11 @@ fn empty_trace(
     Ok(error)
 }
 
-pub(super) fn from_replay(py: Python<'_>, types: &Types, failure: ReplayError<PyErr>) -> PyErr {
-    replay_exception(py, types, failure).unwrap_or_else(|error| error)
+pub(super) fn from_replay(py: Python<'_>, failure: ReplayError<PyErr>) -> PyErr {
+    replay_exception(py, failure).unwrap_or_else(|error| error)
 }
 
-fn replay_exception(py: Python<'_>, types: &Types, failure: ReplayError<PyErr>) -> PyResult<PyErr> {
+fn replay_exception(py: Python<'_>, failure: ReplayError<PyErr>) -> PyResult<PyErr> {
     let error = match failure {
         ReplayError::NoInput => empty_trace(py, "no input trace paths", None)?,
         ReplayError::NoStates(trace) => empty_trace(py, "ITF trace has no states", Some(&trace))?,
@@ -81,18 +81,19 @@ fn replay_exception(py: Python<'_>, types: &Types, failure: ReplayError<PyErr>) 
             error.set_cause(py, source);
             error
         }
-        ReplayError::FailedTrace(failure) => trace_failure(py, types, *failure)?,
+        ReplayError::FailedTrace(failure) => trace_failure(py, *failure)?,
     };
     Ok(error)
 }
 
-fn trace_failure(py: Python<'_>, types: &Types, failure: FailedTrace<PyErr>) -> PyResult<PyErr> {
+fn trace_failure(py: Python<'_>, failure: FailedTrace<PyErr>) -> PyResult<PyErr> {
     let error = match failure.problem {
         TraceProblem::Driver { site, cause } => {
             let stage = match site {
                 DriverFailureSite::Factory => "FACTORY",
                 DriverFailureSite::Apply(_) => "APPLY",
                 DriverFailureSite::Observe(_) => "OBSERVE",
+                DriverFailureSite::Compare(_) => "COMPARE",
                 DriverFailureSite::Exit => "EXIT",
             };
             let error =
@@ -105,9 +106,9 @@ fn trace_failure(py: Python<'_>, types: &Types, failure: FailedTrace<PyErr>) -> 
             trace_failure_defaults(py, &error)?;
             error
         }
-        TraceProblem::Mismatch(mismatch) => {
-            mismatch_exception(py, types, &failure.trace, &mismatch)?
-        }
+        TraceProblem::Mismatch { presented, .. } => presented.into_inner().ok_or_else(|| {
+            PyRuntimeError::new_err("state mismatch was not prepared during driver exit")
+        })?,
     };
     if let Some(cleanup) = failure.driver_cleanup {
         error
@@ -139,22 +140,31 @@ pub(super) fn mismatch_exception(
     trace: &TraceFile,
     mismatch: &Mismatch,
 ) -> PyResult<PyErr> {
-    let error = StateMismatchError::new_err(format!(
+    let expected = types.write(py, &mismatch.expected)?;
+    let actual = types.write(py, &mismatch.actual)?;
+    let diff = super::diagnostics::state_diff(&expected, &actual);
+    let mut message = format!(
         "{}: state differs at step {}",
         trace.display_path.display(),
         mismatch.step_index
-    ));
+    );
+    if !diff.is_empty() {
+        message.push('\n');
+        message.push_str(&diff);
+    }
+    let error = StateMismatchError::new_err(message);
     trace_attributes(&error, py, trace, Some(mismatch.step_index))?;
     trace_failure_defaults(py, &error)?;
     let value = error.value(py);
-    value.setattr("action", types.action(py, &mismatch.step.action)?)?;
-    value.setattr("expected", types.write(py, &mismatch.step.expected)?)?;
-    value.setattr("actual", types.write(py, &mismatch.actual)?)?;
+    value.setattr("action", types.action(py, &mismatch.action)?)?;
+    value.setattr("expected", expected)?;
+    value.setattr("actual", actual)?;
+    value.setattr("diff", diff)?;
     Ok(error)
 }
 
-pub(super) fn from_run(py: Python<'_>, types: &Types, failure: RunError<PyErr>) -> PyErr {
-    run_exception(py, types, failure).unwrap_or_else(|error| error)
+pub(super) fn from_run(py: Python<'_>, failure: RunError<PyErr>) -> PyErr {
+    run_exception(py, failure).unwrap_or_else(|error| error)
 }
 
 fn stage_member<'py>(
@@ -182,7 +192,7 @@ fn io_exception(
     clippy::too_many_lines,
     reason = "one exhaustive match keeps failure-to-exception mapping together"
 )]
-fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyResult<PyErr> {
+fn primary_error(py: Python<'_>, failure: Failure<PyErr>) -> PyResult<PyErr> {
     let error = match failure {
         Failure::Request(request) => {
             return Ok(PyValueError::new_err(match request {
@@ -287,7 +297,7 @@ fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyRe
             error.value(py).setattr("produced", produced)?;
             error
         }
-        Failure::Replay(failure) => replay_exception(py, types, failure)?,
+        Failure::Replay(failure) => replay_exception(py, failure)?,
         Failure::Cleanup { workspace, cause } => {
             let error = WorkspaceError::new_err("could not remove workspace");
             error.value(py).setattr("workspace", workspace.as_path())?;
@@ -302,8 +312,8 @@ fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyRe
     Ok(error)
 }
 
-fn run_exception(py: Python<'_>, types: &Types, result: RunError<PyErr>) -> PyResult<PyErr> {
-    let error = primary_error(py, types, result.failure)?;
+fn run_exception(py: Python<'_>, result: RunError<PyErr>) -> PyResult<PyErr> {
+    let error = primary_error(py, result.failure)?;
     let value = error.value(py);
     value.setattr("seed", result.seed)?;
     value.setattr("cleanup_error", py.None())?;
