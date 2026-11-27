@@ -10,8 +10,8 @@ use serde_json::{Value as Json, json};
 
 use crate::itf::{Action, Selection, fixture_value};
 use crate::replay::{
-    Driver, DriverStage, Mismatch, ReplayEnvironment, ReplayError, ReplayEvent, TraceCause,
-    TraceFile, replay, saved_files,
+    Driver, DriverFailureSite, Mismatch, ReplayEnvironment, ReplayError, ReplayEvent, TraceCause,
+    TraceFile, TraceProblem, replay, saved_files,
 };
 use crate::value::Value;
 
@@ -63,30 +63,95 @@ fn action_json(action: &Action) -> Json {
     json!({"name": action.name, "arguments": arguments_json(&action.arguments)})
 }
 
-fn position(trace: &TraceFile) -> Json {
-    json!({"trace": trace.index, "traceIndex": trace.index})
+#[derive(Clone, Copy)]
+struct TracePosition {
+    id: u64,
+    index: usize,
 }
 
-fn step_position(trace: &TraceFile, step: usize) -> Json {
-    json!({"trace": position(trace), "stepIndex": step})
+impl TracePosition {
+    fn json(self) -> Json {
+        json!({"trace": self.id, "traceIndex": self.index})
+    }
+
+    fn step(self, index: usize) -> Json {
+        json!({"trace": self.json(), "stepIndex": index})
+    }
 }
 
-fn path(trace: &TraceFile) -> Json {
-    tagged("SavedFile", json!(trace.display_path))
+#[derive(Clone, Copy)]
+enum FixtureTrace<'a> {
+    Saved(&'a TraceFile),
+    Generated {
+        trace: &'a TraceFile,
+        id: u64,
+        workspace: u64,
+    },
 }
 
-fn location(trace: &TraceFile, step: Option<usize>) -> Json {
+impl FixtureTrace<'_> {
+    fn position(self) -> TracePosition {
+        match self {
+            Self::Saved(trace) => TracePosition {
+                id: u64::try_from(trace.index).unwrap(),
+                index: trace.index,
+            },
+            Self::Generated { trace, id, .. } => TracePosition {
+                id,
+                index: trace.index,
+            },
+        }
+    }
+
+    fn path(self) -> Json {
+        match self {
+            Self::Saved(trace) => tagged("SavedFile", json!(trace.display_path)),
+            Self::Generated { id, workspace, .. } => working_path(workspace, id),
+        }
+    }
+
+    fn read_details(self) -> Json {
+        let position = self.position().json();
+        let path = self.path();
+        match self {
+            Self::Saved(_) => json!({"path": path, "position": position}),
+            Self::Generated { trace, .. } => json!({
+                "basename": trace.path.file_name().unwrap().to_str().unwrap(),
+                "path": path,
+                "position": position,
+            }),
+        }
+    }
+}
+
+fn working_path(workspace: u64, trace: u64) -> Json {
+    tagged(
+        "WorkingFile",
+        json!({"trace": trace, "workspace": workspace}),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct DriverStep {
+    driver: u64,
+    position: TracePosition,
+    index: usize,
+}
+
+impl DriverStep {
+    fn json(self) -> Json {
+        json!({"driver": self.driver, "position": self.position.step(self.index)})
+    }
+}
+
+fn saved_location(trace: &TraceFile, step: Option<usize>) -> Json {
+    let trace = FixtureTrace::Saved(trace);
     step.map_or_else(
-        || {
-            tagged(
-                "AtSavedTrace",
-                json!({"path": path(trace), "position": position(trace)}),
-            )
-        },
-        |step| {
+        || tagged("AtSavedTrace", trace.read_details()),
+        |index| {
             tagged(
                 "AtSavedStep",
-                json!({"path": path(trace), "position": step_position(trace, step)}),
+                json!({"path": trace.path(), "position": trace.position().step(index)}),
             )
         },
     )
@@ -98,7 +163,7 @@ struct Script {
     link: Option<generated::Link>,
     events: Vec<Json>,
     driver: u64,
-    context: Json,
+    context: Option<DriverStep>,
 }
 
 impl Script {
@@ -119,12 +184,72 @@ impl Script {
         self.events.push(tagged(tag, content));
     }
 
-    fn step_context(&self, trace: &TraceFile, step: usize) -> Json {
-        json!({"driver": self.driver, "position": step_position(trace, step)})
+    fn record_replay<'a>(
+        &mut self,
+        event: ReplayEvent<'a>,
+        resolve: impl FnOnce(&'a TraceFile) -> FixtureTrace<'a>,
+    ) {
+        match event {
+            ReplayEvent::Read(trace) => {
+                let trace = resolve(trace);
+                let tag = match trace {
+                    FixtureTrace::Saved(_) => "SavedReadAttempted",
+                    FixtureTrace::Generated { .. } => "GeneratedReadAttempted",
+                };
+                self.event(tag, trace.read_details());
+            }
+            ReplayEvent::Factory(trace) => {
+                self.event("FactoryCalled", resolve(trace).position().json());
+            }
+            ReplayEvent::DriverCreated(trace) => self.event(
+                "DriverCreated",
+                json!({"driver": self.driver, "trace": resolve(trace).position().json()}),
+            ),
+            ReplayEvent::Apply(trace, index, action) => {
+                let context = DriverStep {
+                    driver: self.driver,
+                    position: resolve(trace).position(),
+                    index,
+                };
+                self.context = Some(context);
+                self.event(
+                    "OperationCalled",
+                    json!({"context": context.json(), "operation": action_json(action)}),
+                );
+            }
+            ReplayEvent::Observe(trace, index, expected) => {
+                let context = DriverStep {
+                    driver: self.driver,
+                    position: resolve(trace).position(),
+                    index,
+                };
+                self.event(
+                    "ObservationCalled",
+                    json!({"context": context.json(), "expected": value_json(expected)}),
+                );
+            }
+        }
     }
 }
 
 struct ScriptedDriver(Rc<RefCell<Script>>);
+
+impl ScriptedDriver {
+    fn create(handle: &Rc<RefCell<Script>>) -> Result<Self, String> {
+        let mut script = handle.borrow_mut();
+        let response = script.receive(&["DriverFactory"]);
+        let result = &response["value"];
+        match result["tag"].as_str() {
+            Some("FactorySucceeded") => {
+                script.driver = result["value"].as_u64().unwrap();
+                Ok(Self(Rc::clone(handle)))
+            }
+            Some("FactoryFailed") => Err(result["value"].as_str().unwrap().to_owned()),
+            _ => panic!("invalid factory result {result}"),
+        }
+    }
+}
+
 impl Driver for ScriptedDriver {
     type Error = String;
 
@@ -142,10 +267,10 @@ impl Driver for ScriptedDriver {
                     .arguments
                     .insert(key.clone(), fixture_value(&value.to_string()).unwrap());
             }
-            let context = script.context.clone();
+            let context = script.context.expect("an operation was recorded");
             script.event(
                 "DriverArgumentsChanged",
-                json!({"arguments": arguments_json(&delivered.arguments), "context": context}),
+                json!({"arguments": arguments_json(&delivered.arguments), "context": context.json()}),
             );
             &response["value"]["result"]
         } else {
@@ -194,56 +319,28 @@ impl ReplayEnvironment for SavedReplay {
     }
 
     fn create_driver(&mut self) -> Result<ScriptedDriver, String> {
-        let mut script = self.script.borrow_mut();
-        let response = script.receive(&["DriverFactory"]);
-        let result = &response["value"];
-        match result["tag"].as_str() {
-            Some("FactorySucceeded") => {
-                script.driver = result["value"].as_u64().unwrap();
-                Ok(ScriptedDriver(Rc::clone(&self.script)))
-            }
-            Some("FactoryFailed") => Err(result["value"].as_str().unwrap().to_owned()),
-            _ => panic!("invalid factory result {result}"),
-        }
+        ScriptedDriver::create(&self.script)
     }
 
     fn event(&mut self, event: ReplayEvent<'_>) {
-        let mut script = self.script.borrow_mut();
-        match event {
-            ReplayEvent::Read(trace) => script.event(
-                "SavedReadAttempted",
-                json!({"path": path(trace), "position": position(trace)}),
-            ),
-            ReplayEvent::Factory(trace) => script.event("FactoryCalled", position(trace)),
-            ReplayEvent::DriverCreated(trace) => {
-                let driver = script.driver;
-                script.event(
-                    "DriverCreated",
-                    json!({"driver": driver, "trace": position(trace)}),
-                );
-            }
-            ReplayEvent::Apply(trace, step, action) => {
-                let context = script.step_context(trace, step);
-                script.context = context.clone();
-                script.event(
-                    "OperationCalled",
-                    json!({"context": context, "operation": action_json(action)}),
-                );
-            }
-            ReplayEvent::Observe(trace, step, expected) => {
-                let context = script.step_context(trace, step);
-                script.event(
-                    "ObservationCalled",
-                    json!({"context": context, "expected": value_json(expected)}),
-                );
-            }
-        }
+        self.script
+            .borrow_mut()
+            .record_replay(event, FixtureTrace::Saved);
     }
 }
 
-fn mismatch_json(mismatch: &Mismatch) -> Json {
+fn driver_stage(stage: DriverFailureSite) -> Json {
+    unit(match stage {
+        DriverFailureSite::Factory => "Factory",
+        DriverFailureSite::Apply(_) => "Apply",
+        DriverFailureSite::Observe(_) => "Observe",
+        DriverFailureSite::Exit => "Exit",
+    })
+}
+
+fn mismatch_json(trace: FixtureTrace<'_>, mismatch: &Mismatch) -> Json {
     json!({
-        "position": step_position(&mismatch.trace, mismatch.step_index),
+        "position": trace.position().step(mismatch.step_index),
         "step": {"operation": action_json(&mismatch.step.action), "expected": value_json(&mismatch.step.expected)},
         "actual": value_json(&mismatch.actual),
     })
@@ -257,7 +354,7 @@ fn outcome(result: Result<(), ReplayError<String>>) -> Json {
             "EmptyTrace",
             tagged(
                 "NoSavedTraceStates",
-                json!({"path": path(&trace), "position": position(&trace)}),
+                FixtureTrace::Saved(&trace).read_details(),
             ),
         ),
         Err(ReplayError::InvalidTrace { trace, step, cause }) => {
@@ -267,31 +364,25 @@ fn outcome(result: Result<(), ReplayError<String>>) -> Json {
             };
             tagged(
                 "TraceFailed",
-                json!({"location": location(&trace, step), "cause": cause}),
+                json!({"location": saved_location(&trace, step), "cause": cause}),
             )
         }
-        Err(ReplayError::Driver {
-            trace,
-            step,
-            stage,
-            cause,
-        }) => {
-            let stage = match stage {
-                DriverStage::Factory => "Factory",
-                DriverStage::Apply => "Apply",
-                DriverStage::Observe => "Observe",
-            };
-            tagged(
-                "DriverFailed",
-                json!({"location": location(&trace, step), "stage": unit(stage), "cause": *cause}),
-            )
+        Err(ReplayError::FailedTrace(failure)) => {
+            assert!(failure.driver_cleanup.is_none());
+            match failure.problem {
+                TraceProblem::Driver { site, cause } => tagged(
+                    "DriverFailed",
+                    json!({"location": saved_location(&failure.trace, site.step_index()), "stage": driver_stage(site), "cause": *cause}),
+                ),
+                TraceProblem::Mismatch(mismatch) => tagged(
+                    "StatesDiffer",
+                    json!({
+                        "detail": mismatch_json(FixtureTrace::Saved(&failure.trace), &mismatch),
+                        "artifacts": tagged("FromSavedFile", FixtureTrace::Saved(&failure.trace).path()),
+                    }),
+                ),
+            }
         }
-        Err(ReplayError::Mismatch(mismatch)) => tagged(
-            "StatesDiffer",
-            json!({
-                "detail": mismatch_json(&mismatch), "artifacts": tagged("FromSavedFile", path(&mismatch.trace)),
-            }),
-        ),
     };
     tagged(
         "Failed",

@@ -11,8 +11,7 @@ import pytest
 def test_same_seed_artifacts_survive_two_workers(tmp_path: Path) -> None:
     if which("quint") is None:
         pytest.skip("requires Quint 0.34.0 on PATH")
-    shared = tmp_path / "artifacts"
-    shared.mkdir()
+    shared = tmp_path / "output" / "artifacts"
     environment = {**os.environ, "QUINT_TEST_SHARED_ARTIFACT_DIR": str(shared)}
     scenario = Path(__file__).with_name("test_quint_integration.py")
     command = [

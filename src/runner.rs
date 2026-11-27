@@ -134,7 +134,7 @@ pub trait RunEnvironment: ReplayEnvironment {
     fn wait(&mut self, child: &mut Self::Child) -> Result<ChildOutput, ChildIoError>;
     fn confirm_exit(&mut self, child: &mut Self::Child) -> io::Result<()>;
     fn list(&mut self, workspace: &Path) -> io::Result<Vec<PathBuf>>;
-    fn artifact_candidates(&mut self, root: &Path) -> io::Result<Vec<PathBuf>>;
+    fn prepare_artifact_candidates(&mut self, root: &Path) -> io::Result<Vec<PathBuf>>;
     fn reserve_artifact(&mut self, directory: &Path) -> io::Result<()>;
     fn publish(&mut self, directory: &Path, name: &OsStr, bytes: &[u8]) -> io::Result<PathBuf>;
     fn cleanup(&mut self, workspace: &Path) -> io::Result<()>;
@@ -204,9 +204,9 @@ pub fn run_from<E: RunEnvironment>(
         if matches!(error.cleanup, Some(Cleanup::Deferred { .. })) {
             return result;
         }
-        if let Failure::Replay(ReplayError::Mismatch(mismatch)) = &error.failure {
-            let saved = save_evidence(environment, &root, &mismatch.trace, &mismatch.bytes);
-            environment.run_event(RunEvent::ArtifactSaved(&mismatch.trace, &saved));
+        if let Failure::Replay(ReplayError::FailedTrace(trace)) = &error.failure {
+            let saved = save_evidence(environment, &root, &trace.trace, &trace.bytes);
+            environment.run_event(RunEvent::ArtifactSaved(&trace.trace, &saved));
             error.artifact = Some(saved);
         }
     }
@@ -312,7 +312,7 @@ fn save_evidence<E: RunEnvironment>(
         ))
     })?;
     let candidates = environment
-        .artifact_candidates(root)
+        .prepare_artifact_candidates(root)
         .map_err(ArtifactError::Prepare)?;
     let mut collision = None;
     for directory in candidates {
@@ -368,7 +368,8 @@ impl<D: Driver, F: FnMut() -> Result<D, D::Error>> RunEnvironment for LocalEnvir
         Ok(files)
     }
 
-    fn artifact_candidates(&mut self, root: &Path) -> io::Result<Vec<PathBuf>> {
+    fn prepare_artifact_candidates(&mut self, root: &Path) -> io::Result<Vec<PathBuf>> {
+        std::fs::create_dir_all(root)?;
         let nonce = getrandom::u64().map_err(io::Error::other)?;
         Ok((0..16)
             .map(|index| root.join(format!("quint-artifact-{nonce:016x}-{index}")))

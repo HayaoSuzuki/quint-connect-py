@@ -6,9 +6,11 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 
-use crate::cli::{Mode, Request};
+use crate::cli::{Backend, Mode, Request};
 use crate::itf::{Action, Selection};
-use crate::replay::{Driver, LocalEnvironment, replay as replay_files, saved_files};
+use crate::replay::{
+    Driver, LocalEnvironment, TraceFile, TraceProblem, replay as replay_files, saved_files,
+};
 use crate::runner::run as run_model;
 use crate::value::Value;
 
@@ -16,6 +18,7 @@ use self::value::Types;
 
 struct PythonDriver {
     object: Py<PyAny>,
+    exit: Py<PyAny>,
     types: Arc<Types>,
 }
 
@@ -36,26 +39,64 @@ impl Driver for PythonDriver {
             self.types.read(&observed)
         })
     }
+
+    fn finish(self, trace: &TraceFile, problem: Option<&TraceProblem<PyErr>>) -> PyResult<()> {
+        Python::attach(|py| {
+            let exit = self.exit.bind(py);
+            match problem {
+                None => exit.call1((py.None(), py.None(), py.None()))?,
+                Some(problem) => {
+                    let exception = match problem {
+                        TraceProblem::Driver { cause, .. } => cause.clone_ref(py),
+                        TraceProblem::Mismatch(mismatch) => {
+                            error::mismatch_exception(py, &self.types, trace, mismatch)
+                                .unwrap_or_else(|error| error)
+                        }
+                    };
+                    exit.call1((
+                        exception.get_type(py),
+                        exception.value(py),
+                        exception.traceback(py),
+                    ))?
+                }
+            };
+            Ok(())
+        })
+    }
 }
 
-fn factory(factory: Py<PyAny>, types: Arc<Types>) -> impl FnMut() -> PyResult<PythonDriver> + Send {
+fn factory(
+    context_factory: Py<PyAny>,
+    types: Arc<Types>,
+) -> impl FnMut() -> PyResult<PythonDriver> + Send {
     move || {
         Python::attach(|py| {
-            let object = factory.bind(py).call0()?.unbind();
+            let context = context_factory.bind(py).call0()?;
+            let exit = context.getattr("__exit__")?.unbind();
+            let object = context.call_method0("__enter__")?.unbind();
             Ok(PythonDriver {
                 object,
+                exit,
                 types: Arc::clone(&types),
             })
         })
     }
 }
 
-type SelectionPaths = (Vec<String>, Vec<String>);
+#[derive(FromPyObject)]
+struct SelectionPaths {
+    #[pyo3(item)]
+    action_path: Vec<String>,
+    #[pyo3(item)]
+    state_path: Vec<String>,
+}
 
-fn selection((action_path, state_path): SelectionPaths) -> Selection {
-    Selection {
-        action_path,
-        state_path,
+impl From<SelectionPaths> for Selection {
+    fn from(paths: SelectionPaths) -> Self {
+        Self {
+            action_path: paths.action_path,
+            state_path: paths.state_path,
+        }
     }
 }
 
@@ -67,61 +108,110 @@ fn selection((action_path, state_path): SelectionPaths) -> Selection {
 fn replay(
     py: Python<'_>,
     paths: Vec<PathBuf>,
-    driver_factory: Py<PyAny>,
+    context_factory: Py<PyAny>,
     paths_selection: SelectionPaths,
 ) -> PyResult<()> {
     let types = Arc::new(Types::load(py)?);
-    let mut environment = LocalEnvironment(factory(driver_factory, Arc::clone(&types)));
+    let mut environment = LocalEnvironment(factory(context_factory, Arc::clone(&types)));
     let caller = std::env::current_dir()?;
     let files = saved_files(&paths, &caller);
-    let selection = selection(paths_selection);
+    let selection = Selection::from(paths_selection);
     let result = py.detach(move || replay_files(&files, &selection, &mut environment));
     result.map_err(|failure| error::from_replay(py, &types, failure))
 }
 
-type Common = (PathBuf, Option<String>, Option<u64>);
-type Simulation = (Option<String>, Option<String>, u64, Option<u64>);
-type Execution = (PathBuf, Option<u64>, Option<String>, Option<PathBuf>);
+#[derive(FromPyObject)]
+enum GenerationMode {
+    Simulation {
+        #[pyo3(item)]
+        init: Option<String>,
+        #[pyo3(item)]
+        step: Option<String>,
+        #[pyo3(item)]
+        n_traces: u64,
+        #[pyo3(item)]
+        max_steps: Option<u64>,
+    },
+    NamedTest {
+        #[pyo3(item)]
+        test: String,
+    },
+}
+
+#[derive(FromPyObject)]
+struct RunRequest {
+    #[pyo3(item)]
+    spec: PathBuf,
+    #[pyo3(item)]
+    quint: PathBuf,
+    #[pyo3(item)]
+    main: Option<String>,
+    #[pyo3(item)]
+    max_samples: Option<u64>,
+    #[pyo3(item)]
+    mode: GenerationMode,
+    #[pyo3(item)]
+    seed: Option<u64>,
+    #[pyo3(item)]
+    backend: Option<String>,
+    #[pyo3(item)]
+    artifact_dir: Option<PathBuf>,
+}
+
+impl TryFrom<RunRequest> for Request {
+    type Error = PyErr;
+
+    fn try_from(request: RunRequest) -> PyResult<Self> {
+        let mode = match request.mode {
+            GenerationMode::Simulation {
+                init,
+                step,
+                n_traces,
+                max_steps,
+            } => Mode::Simulation {
+                init,
+                step,
+                traces: n_traces,
+                samples: request.max_samples,
+                steps: max_steps,
+            },
+            GenerationMode::NamedTest { test } => Mode::NamedTest {
+                name: test,
+                samples: request.max_samples,
+            },
+        };
+        let backend = request
+            .backend
+            .as_deref()
+            .map(str::parse::<Backend>)
+            .transpose()
+            .map_err(|()| {
+                pyo3::exceptions::PyTypeError::new_err("backend must be a Backend member")
+            })?;
+
+        Ok(Self {
+            model: request.spec,
+            executable: request.quint,
+            main: request.main,
+            backend,
+            mode,
+            seed: request.seed,
+            artifact_dir: request.artifact_dir,
+        })
+    }
+}
 
 #[pyfunction]
 fn run(
     py: Python<'_>,
-    common: Common,
-    named_test: Option<String>,
-    simulation: Option<Simulation>,
-    driver_factory: Py<PyAny>,
-    execution: Execution,
+    request: RunRequest,
+    context_factory: Py<PyAny>,
     paths_selection: SelectionPaths,
 ) -> PyResult<()> {
-    let (model, main, samples) = common;
-    let (executable, seed, backend, artifact_dir) = execution;
-    let mode = match (named_test, simulation) {
-        (Some(name), None) => Mode::NamedTest { name, samples },
-        (None, Some((init, step, traces, steps))) => Mode::Simulation {
-            init,
-            step,
-            traces,
-            samples,
-            steps,
-        },
-        _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "expected one Quint generation mode",
-            ));
-        }
-    };
-    let request = Request {
-        model,
-        executable,
-        main,
-        backend,
-        mode,
-        seed,
-        artifact_dir,
-    };
-    let selection = selection(paths_selection);
+    let request = Request::try_from(request)?;
+    let selection = Selection::from(paths_selection);
     let types = Arc::new(Types::load(py)?);
-    let mut environment = LocalEnvironment(factory(driver_factory, Arc::clone(&types)));
+    let mut environment = LocalEnvironment(factory(context_factory, Arc::clone(&types)));
     let result = py.detach(move || run_model(&request, &selection, &mut environment));
     result.map_err(|failure| error::from_run(py, &types, *failure))
 }

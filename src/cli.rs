@@ -1,10 +1,38 @@
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::itf::Selection;
 
 pub const LIMIT: u64 = (1 << 53) - 1;
+
+#[derive(Clone, Copy)]
+pub enum Backend {
+    Rust,
+    TypeScript,
+}
+
+impl Backend {
+    const fn argument(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+        }
+    }
+}
+
+impl FromStr for Backend {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "rust" => Ok(Self::Rust),
+            "typescript" => Ok(Self::TypeScript),
+            _ => Err(()),
+        }
+    }
+}
 
 pub enum Mode {
     Simulation {
@@ -24,7 +52,7 @@ pub struct Request {
     pub model: PathBuf,
     pub executable: PathBuf,
     pub main: Option<String>,
-    pub backend: Option<String>,
+    pub backend: Option<Backend>,
     pub mode: Mode,
     pub seed: Option<u64>,
     pub artifact_dir: Option<PathBuf>,
@@ -65,7 +93,11 @@ pub fn plan(
         format!("--seed={seed}").into(),
     ];
     optional_argument(&mut common, "--main", request.main.as_deref());
-    optional_argument(&mut common, "--backend", request.backend.as_deref());
+    optional_argument(
+        &mut common,
+        "--backend",
+        request.backend.map(Backend::argument),
+    );
 
     let (arguments, trace_count) = match &request.mode {
         Mode::Simulation {

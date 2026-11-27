@@ -2,6 +2,7 @@
 
 - [初期設計と受け入れ条件](work/initial-design/design.md) — 公開 API、モジュールの責務、Quint と Python の検証の対応。
 - [Quint の仕様](../../spec/quint_connect.qnt) — 生成と再生、失敗の優先順位、呼び出しごとの分離。
+- [ドライバーの寿命](../../spec/quint_driver_lifecycle.qnt) — トレースごとの開始と終了、先に起きた失敗の優先順位。
 - [Quint の仕様レビュー](work/initial-design/spec-review.md) — 検証範囲、不変条件、実行結果。
 - [Python 実装計画](work/initial-design/plan.md) — 仕様から実装と受け入れ試験への対応。
 
@@ -40,7 +41,7 @@ python3 tools/check_wheel.py dist/quint_connect_py-*-cp314-abi3-*.whl
 
 ```sh
 gh workflow run release.yml --ref main
-gh workflow run release.yml --ref main -f publish_version=0.1.0
+gh workflow run release.yml --ref main -f publish_version="$(uv version --short)"
 ```
 
 バージョンを指定した実行では、同じコミットの CI 成功を確認してから、検証済みの各ファイルに SLSA ビルド来歴を付ける。TestPyPI に Trusted Publishing でアップロードし、取得し直したファイルが同一であり、ビルド来歴と公開アテステーションが有効であることを確認する。この検証が通過してから、同じファイルを PyPI へ公開し、同じ検証を行う。バージョンを空にした手動実行と PR では、ビルドからメタデータ検査までを実行する。

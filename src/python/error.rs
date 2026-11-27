@@ -3,7 +3,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::cli::InvalidRequest;
-use crate::replay::{DriverStage, ReplayError, TraceCause, TraceFile};
+use crate::replay::{
+    DriverFailureSite, FailedTrace, Mismatch, ReplayError, TraceCause, TraceFile, TraceProblem,
+};
 use crate::runner::{ArtifactError, ChildIoStage, Cleanup, Exit, Failure, RunError};
 
 use super::value::Types;
@@ -79,44 +81,75 @@ fn replay_exception(py: Python<'_>, types: &Types, failure: ReplayError<PyErr>) 
             error.set_cause(py, source);
             error
         }
-        ReplayError::Driver {
-            trace,
-            step,
-            stage,
-            cause,
-        } => {
-            let stage = match stage {
-                DriverStage::Factory => "factory",
-                DriverStage::Apply => "apply",
-                DriverStage::Observe => "observe",
+        ReplayError::FailedTrace(failure) => trace_failure(py, types, *failure)?,
+    };
+    Ok(error)
+}
+
+fn trace_failure(py: Python<'_>, types: &Types, failure: FailedTrace<PyErr>) -> PyResult<PyErr> {
+    let error = match failure.problem {
+        TraceProblem::Driver { site, cause } => {
+            let stage = match site {
+                DriverFailureSite::Factory => "FACTORY",
+                DriverFailureSite::Apply(_) => "APPLY",
+                DriverFailureSite::Observe(_) => "OBSERVE",
+                DriverFailureSite::Exit => "EXIT",
             };
-            let error = DriverError::new_err(format!("driver {stage} failed"));
-            trace_attributes(&error, py, &trace, step)?;
-            error.value(py).setattr("stage", stage)?;
+            let error =
+                DriverError::new_err(format!("driver {} failed", stage.to_ascii_lowercase()));
+            trace_attributes(&error, py, &failure.trace, site.step_index())?;
+            error
+                .value(py)
+                .setattr("stage", stage_member(py, "DriverStage", stage)?)?;
             error.set_cause(py, Some(*cause));
+            trace_failure_defaults(py, &error)?;
             error
         }
-        ReplayError::Mismatch(mismatch) => {
-            let error = StateMismatchError::new_err(format!(
-                "{}: state differs at step {}",
-                mismatch.trace.display_path.display(),
-                mismatch.step_index
-            ));
-            trace_attributes(&error, py, &mismatch.trace, Some(mismatch.step_index))?;
-            let value = error.value(py);
-            value.setattr("action", types.action(py, &mismatch.step.action)?)?;
-            value.setattr("expected", types.write(py, &mismatch.step.expected)?)?;
-            value.setattr("actual", types.write(py, &mismatch.actual)?)?;
-            value.setattr("seed", py.None())?;
-            value.setattr("artifact_path", py.None())?;
-            value.setattr("artifact_error", py.None())?;
-            value.setattr("artifact_candidate", py.None())?;
-            value.setattr("cleanup_error", py.None())?;
-            value.setattr("cleanup_deferred", false)?;
-            value.setattr("workspace", py.None())?;
-            error
+        TraceProblem::Mismatch(mismatch) => {
+            mismatch_exception(py, types, &failure.trace, &mismatch)?
         }
     };
+    if let Some(cleanup) = failure.driver_cleanup {
+        error
+            .value(py)
+            .setattr("driver_cleanup_error", cleanup.into_value(py))?;
+    }
+    Ok(error)
+}
+
+fn trace_failure_defaults(py: Python<'_>, error: &PyErr) -> PyResult<()> {
+    let value = error.value(py);
+    for attribute in [
+        "seed",
+        "artifact_path",
+        "artifact_error",
+        "artifact_candidate",
+        "cleanup_error",
+        "workspace",
+        "driver_cleanup_error",
+    ] {
+        value.setattr(attribute, py.None())?;
+    }
+    value.setattr("cleanup_deferred", false)
+}
+
+pub(super) fn mismatch_exception(
+    py: Python<'_>,
+    types: &Types,
+    trace: &TraceFile,
+    mismatch: &Mismatch,
+) -> PyResult<PyErr> {
+    let error = StateMismatchError::new_err(format!(
+        "{}: state differs at step {}",
+        trace.display_path.display(),
+        mismatch.step_index
+    ));
+    trace_attributes(&error, py, trace, Some(mismatch.step_index))?;
+    trace_failure_defaults(py, &error)?;
+    let value = error.value(py);
+    value.setattr("action", types.action(py, &mismatch.step.action)?)?;
+    value.setattr("expected", types.write(py, &mismatch.step.expected)?)?;
+    value.setattr("actual", types.write(py, &mismatch.actual)?)?;
     Ok(error)
 }
 
@@ -124,10 +157,20 @@ pub(super) fn from_run(py: Python<'_>, types: &Types, failure: RunError<PyErr>) 
     run_exception(py, types, failure).unwrap_or_else(|error| error)
 }
 
+fn stage_member<'py>(
+    py: Python<'py>,
+    enum_name: &str,
+    member: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    PyModule::import(py, "quint_connect")?
+        .getattr(enum_name)?
+        .getattr(member)
+}
+
 fn io_exception(
     py: Python<'_>,
     error: PyErr,
-    stage: &'static str,
+    stage: Bound<'_, PyAny>,
     cause: std::io::Error,
 ) -> PyResult<PyErr> {
     error.value(py).setattr("stage", stage)?;
@@ -152,12 +195,16 @@ fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyRe
             }));
         }
         Failure::RandomSeed(cause) => {
-            WorkspaceError::new_err(format!("could not draw a seed: {cause}"))
+            let error = WorkspaceError::new_err(format!("could not draw a seed: {cause}"));
+            error
+                .value(py)
+                .setattr("stage", stage_member(py, "WorkspaceStage", "RANDOM_SEED")?)?;
+            error
         }
         Failure::CurrentDirectory(cause) => io_exception(
             py,
             WorkspaceError::new_err("could not read caller directory"),
-            "caller_directory",
+            stage_member(py, "WorkspaceStage", "CALLER_DIRECTORY")?,
             cause,
         )?,
         Failure::Lookup(lookup) => {
@@ -168,18 +215,23 @@ fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyRe
             error
                 .value(py)
                 .setattr("executable", lookup.path.as_path())?;
-            io_exception(py, error, "lookup", lookup.cause)?
+            io_exception(
+                py,
+                error,
+                stage_member(py, "QuintStage", "LOOKUP")?,
+                lookup.cause,
+            )?
         }
         Failure::Reserve(cause) => io_exception(
             py,
             WorkspaceError::new_err("could not reserve workspace"),
-            "reserve",
+            stage_member(py, "WorkspaceStage", "RESERVE")?,
             cause,
         )?,
         Failure::Spawn(cause) => io_exception(
             py,
             QuintError::new_err("could not spawn Quint"),
-            "spawn",
+            stage_member(py, "QuintStage", "SPAWN")?,
             cause,
         )?,
         Failure::Exit {
@@ -194,7 +246,7 @@ fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyRe
                 Exit::Signal(signal) => (None, Some(signal)),
                 _ => (None, None),
             };
-            value.setattr("stage", "exit")?;
+            value.setattr("stage", stage_member(py, "QuintStage", "EXIT")?)?;
             value.setattr("exit_code", code)?;
             value.setattr("signal", signal)?;
             value.setattr("stdout", PyBytes::new(py, &stdout))?;
@@ -203,20 +255,25 @@ fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyRe
         }
         Failure::ChildIo(problem) => {
             let stage = match problem.stage {
-                ChildIoStage::WaitForExit => "wait_for_exit",
-                ChildIoStage::CollectOutput => "collect_output",
+                ChildIoStage::WaitForExit => "WAIT_FOR_EXIT",
+                ChildIoStage::CollectOutput => "COLLECT_OUTPUT",
             };
             io_exception(
                 py,
-                QuintError::new_err(format!("Quint {stage} failed")),
-                stage,
+                QuintError::new_err(format!("Quint {} failed", stage.to_ascii_lowercase())),
+                stage_member(py, "QuintStage", stage)?,
                 problem.cause,
             )?
         }
         Failure::Listing { workspace, cause } => {
             let error = WorkspaceError::new_err("could not list workspace");
             error.value(py).setattr("workspace", workspace.as_path())?;
-            io_exception(py, error, "listing", cause)?
+            io_exception(
+                py,
+                error,
+                stage_member(py, "WorkspaceStage", "LISTING")?,
+                cause,
+            )?
         }
         Failure::EmptyOutput => empty_trace(py, "Quint generated no ITF traces", None)?,
         Failure::Incomplete {
@@ -234,7 +291,12 @@ fn primary_error(py: Python<'_>, types: &Types, failure: Failure<PyErr>) -> PyRe
         Failure::Cleanup { workspace, cause } => {
             let error = WorkspaceError::new_err("could not remove workspace");
             error.value(py).setattr("workspace", workspace.as_path())?;
-            io_exception(py, error, "cleanup", cause)?
+            io_exception(
+                py,
+                error,
+                stage_member(py, "WorkspaceStage", "CLEANUP")?,
+                cause,
+            )?
         }
     };
     Ok(error)

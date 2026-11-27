@@ -83,6 +83,7 @@ module quint_conformance {
     | DriverApplyWithMutation({ result: OperationResult, arguments: qv::Text -> Value })
     | DriverObserve(ObservationResult)
     | ArtifactCandidateList(List[int])
+    | ArtifactCandidatesUnavailable(str)
     | ArtifactReservation(StorageResult)
     | EvidenceCopyStarted
     | EvidenceCopyWritten(int)
@@ -134,6 +135,7 @@ module quint_conformance {
       | DriverApplyWithMutation(apply) => applyOperationWithMutation(id, apply.result, apply.arguments)
       | DriverObserve(result) => observeState(id, result)
       | ArtifactCandidateList(candidates) => planArtifactDirectories(id, candidates)
+      | ArtifactCandidatesUnavailable(cause) => failArtifactPreparation(id, cause)
       | ArtifactReservation(result) => tryArtifactDirectory(id, result)
       | EvidenceCopyStarted => beginArtifactCopy(id)
       | EvidenceCopyWritten(count) => writeArtifactCopy(id, count)
@@ -321,6 +323,22 @@ module quint_conformance {
       .then(respond(DriverApply(OperationApplied)))
       .then(respond(DriverObserve(Observed(integerDigit(1)))))
 
+  run generatedDriverFailureSavedTest =
+    initialize(generatedRequest(simulationWithCount(1), itemsSelection))
+      .then(respond(ChildStarted))
+      .then(respond(ChildSucceeded(List(firstFile))))
+      .then(respond(DirectoryListing(ListingSucceeded)))
+      .then(respond(GeneratedRead(ReadSucceeded)))
+      .then(respond(DriverFactory(FactorySucceeded(1))))
+      .then(respond(DriverApply(OperationFailed("driver failed"))))
+      .then(respond(ArtifactCandidateList(List(7))))
+      .then(respond(ArtifactReservation(StorageSucceeded)))
+      .then(respond(EvidenceCopyStarted))
+      .then(respond(EvidenceCopyWritten(originalBytes.length())))
+      .then(respond(EvidenceCopyFinished(StorageSucceeded)))
+      .then(respond(removedWorkspace))
+      .expect(completedFixture)
+
   run generatedMismatchSavedTest =
     reachGeneratedMismatch
       .then(respond(ArtifactCandidateList(List(7))))
@@ -329,6 +347,12 @@ module quint_conformance {
       .then(respond(EvidenceCopyWritten(5)))
       .then(respond(EvidenceCopyWritten(originalBytes.length())))
       .then(respond(EvidenceCopyFinished(StorageSucceeded)))
+      .then(respond(removedWorkspace))
+      .expect(completedFixture)
+
+  run artifactPreparationFailureTest =
+    reachGeneratedMismatch
+      .then(respond(ArtifactCandidatesUnavailable("artifact root unavailable")))
       .then(respond(removedWorkspace))
       .expect(completedFixture)
 

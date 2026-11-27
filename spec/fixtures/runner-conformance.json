@@ -849,6 +849,581 @@
             "call_id": 1,
             "events": [
               {
+                "tag": "CommandPrepared",
+                "value": {
+                  "command": {
+                    "argv": [
+                      {
+                        "tag": "LiteralArgument",
+                        "value": "run"
+                      },
+                      {
+                        "tag": "ModelArgument",
+                        "value": {
+                          "tag": "AnchoredPath",
+                          "value": {
+                            "directory": "/models",
+                            "path": "sample.qnt"
+                          }
+                        }
+                      },
+                      {
+                        "tag": "LiteralArgument",
+                        "value": "--mbt"
+                      },
+                      {
+                        "tag": "StringOption",
+                        "value": {
+                          "flag": "--out-itf",
+                          "value": "trace_{seq}.itf.json"
+                        }
+                      },
+                      {
+                        "tag": "SeedOption",
+                        "value": [
+                          "4",
+                          "2"
+                        ]
+                      },
+                      {
+                        "tag": "IntegerOption",
+                        "value": {
+                          "flag": "--n-traces",
+                          "value": 1
+                        }
+                      },
+                      {
+                        "tag": "IntegerOption",
+                        "value": {
+                          "flag": "--max-samples",
+                          "value": 1
+                        }
+                      }
+                    ],
+                    "executable": {
+                      "tag": "DirectExecutable",
+                      "value": {
+                        "tag": "AbsoluteTarget",
+                        "value": "/bin/quint"
+                      }
+                    },
+                    "seed": [
+                      "4",
+                      "2"
+                    ],
+                    "workspace": 1
+                  },
+                  "drawnSeed": [
+                    "4",
+                    "2"
+                  ],
+                  "request": {
+                    "backend": {
+                      "tag": "CliDefault",
+                      "value": null
+                    },
+                    "callerDirectory": "/models",
+                    "config": {
+                      "tag": "Simulation",
+                      "value": {
+                        "init": {
+                          "tag": "CliDefault",
+                          "value": null
+                        },
+                        "maxSamples": {
+                          "tag": "CliDefault",
+                          "value": null
+                        },
+                        "maxSteps": {
+                          "tag": "CliDefault",
+                          "value": null
+                        },
+                        "nTraces": {
+                          "tag": "CliSpecified",
+                          "value": 1
+                        },
+                        "step": {
+                          "tag": "CliDefault",
+                          "value": null
+                        }
+                      }
+                    },
+                    "executable": {
+                      "tag": "ExecutablePath",
+                      "value": {
+                        "tag": "AbsolutePath",
+                        "value": "/bin/quint"
+                      }
+                    },
+                    "main": {
+                      "tag": "CliDefault",
+                      "value": null
+                    },
+                    "model": {
+                      "tag": "RelativePath",
+                      "value": "sample.qnt"
+                    },
+                    "seed": {
+                      "tag": "CliSpecified",
+                      "value": [
+                        "4",
+                        "2"
+                      ]
+                    },
+                    "workspace": 1
+                  },
+                  "target": {
+                    "tag": "ExplicitExecutable",
+                    "value": {
+                      "tag": "AbsoluteTarget",
+                      "value": "/bin/quint"
+                    }
+                  }
+                }
+              },
+              {
+                "tag": "WorkspaceReserved",
+                "value": {
+                  "artifactRoot": "default artifacts",
+                  "expectation": {
+                    "tag": "SimulationCount",
+                    "value": 1
+                  },
+                  "seed": [
+                    "4",
+                    "2"
+                  ],
+                  "workspace": 1
+                }
+              },
+              {
+                "tag": "ProcessStarted",
+                "value": {
+                  "artifactRoot": "default artifacts",
+                  "expectation": {
+                    "tag": "SimulationCount",
+                    "value": 1
+                  },
+                  "seed": [
+                    "4",
+                    "2"
+                  ],
+                  "workspace": 1
+                }
+              },
+              {
+                "tag": "ProcessExitedSuccessfully",
+                "value": {
+                  "artifactRoot": "default artifacts",
+                  "expectation": {
+                    "tag": "SimulationCount",
+                    "value": 1
+                  },
+                  "seed": [
+                    "4",
+                    "2"
+                  ],
+                  "workspace": 1
+                }
+              },
+              {
+                "tag": "GenerationCompleted",
+                "value": {
+                  "basenames": {
+                    "#map": [
+                      [
+                        2,
+                        "trace_2.itf.json"
+                      ]
+                    ]
+                  },
+                  "generation": {
+                    "artifactRoot": "default artifacts",
+                    "expectation": {
+                      "tag": "SimulationCount",
+                      "value": 1
+                    },
+                    "seed": [
+                      "4",
+                      "2"
+                    ],
+                    "workspace": 1
+                  },
+                  "result": {
+                    "tag": "ProcessSucceeded",
+                    "value": [2]
+                  }
+                }
+              },
+              {
+                "tag": "GeneratedReadAttempted",
+                "value": {
+                  "basename": "trace_2.itf.json",
+                  "path": {
+                    "tag": "WorkingFile",
+                    "value": {
+                      "trace": 2,
+                      "workspace": 1
+                    }
+                  },
+                  "position": {
+                    "trace": 2,
+                    "traceIndex": 0
+                  }
+                }
+              },
+              {
+                "tag": "FactoryCalled",
+                "value": {
+                  "trace": 2,
+                  "traceIndex": 0
+                }
+              },
+              {
+                "tag": "DriverCreated",
+                "value": {
+                  "driver": 1,
+                  "trace": {
+                    "trace": 2,
+                    "traceIndex": 0
+                  }
+                }
+              },
+              {
+                "tag": "OperationCalled",
+                "value": {
+                  "context": {
+                    "driver": 1,
+                    "position": {
+                      "stepIndex": 0,
+                      "trace": {
+                        "trace": 2,
+                        "traceIndex": 0
+                      }
+                    }
+                  },
+                  "operation": {
+                    "arguments": {},
+                    "name": "init"
+                  }
+                }
+              },
+              {
+                "tag": "ObservationCalled",
+                "value": {
+                  "context": {
+                    "driver": 1,
+                    "position": {
+                      "stepIndex": 0,
+                      "trace": {
+                        "trace": 2,
+                        "traceIndex": 0
+                      }
+                    }
+                  },
+                  "expected": {
+                    "#set": [
+                      true,
+                      {
+                        "#bigint": "1"
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "tag": "SaveAttempted",
+                "value": {
+                  "position": {
+                    "trace": 2,
+                    "traceIndex": 0
+                  },
+                  "result": {
+                    "tag": "ArtifactPreparationFailed",
+                    "value": "artifact root unavailable"
+                  }
+                }
+              },
+              {
+                "tag": "CleanupAttempted",
+                "value": {
+                  "result": {
+                    "tag": "StorageSucceeded",
+                    "value": null
+                  },
+                  "workspace": 1
+                }
+              }
+            ],
+            "outcome": {
+              "tag": "Failed",
+              "value": {
+                "cleanup": {
+                  "tag": "NoCleanupError",
+                  "value": null
+                },
+                "error": {
+                  "tag": "StatesDiffer",
+                  "value": {
+                    "artifacts": {
+                      "tag": "FromGeneration",
+                      "value": {
+                        "save": {
+                          "tag": "ArtifactPreparationFailed",
+                          "value": "artifact root unavailable"
+                        },
+                        "seed": [
+                          "4",
+                          "2"
+                        ]
+                      }
+                    },
+                    "detail": {
+                      "actual": {
+                        "#bigint": "1"
+                      },
+                      "position": {
+                        "stepIndex": 0,
+                        "trace": {
+                          "trace": 2,
+                          "traceIndex": 0
+                        }
+                      },
+                      "step": {
+                        "expected": {
+                          "#set": [
+                            true,
+                            {
+                              "#bigint": "1"
+                            }
+                          ]
+                        },
+                        "operation": {
+                          "arguments": {},
+                          "name": "init"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "remaining_workspace_files": [],
+        "saved_files": []
+      },
+      "input_files": [],
+      "name": "artifactPreparationFailure",
+      "schedule": [
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Start",
+            "value": {
+              "tag": "RunQuint",
+              "value": {
+                "artifactRoot": "default artifacts",
+                "cli": {
+                  "backend": {
+                    "tag": "CliDefault",
+                    "value": null
+                  },
+                  "callerDirectory": "/models",
+                  "config": {
+                    "tag": "Simulation",
+                    "value": {
+                      "init": {
+                        "tag": "CliDefault",
+                        "value": null
+                      },
+                      "maxSamples": {
+                        "tag": "CliDefault",
+                        "value": null
+                      },
+                      "maxSteps": {
+                        "tag": "CliDefault",
+                        "value": null
+                      },
+                      "nTraces": {
+                        "tag": "CliSpecified",
+                        "value": 1
+                      },
+                      "step": {
+                        "tag": "CliDefault",
+                        "value": null
+                      }
+                    }
+                  },
+                  "executable": {
+                    "tag": "ExecutablePath",
+                    "value": {
+                      "tag": "AbsolutePath",
+                      "value": "/bin/quint"
+                    }
+                  },
+                  "main": {
+                    "tag": "CliDefault",
+                    "value": null
+                  },
+                  "model": {
+                    "tag": "RelativePath",
+                    "value": "sample.qnt"
+                  },
+                  "seed": {
+                    "tag": "CliSpecified",
+                    "value": [
+                      "4",
+                      "2"
+                    ]
+                  },
+                  "workspace": 1
+                },
+                "drawnSeed": [
+                  "4",
+                  "2"
+                ],
+                "selection": {
+                  "actionPath": [],
+                  "statePath": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "ChildStarted",
+              "value": null
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "ChildSucceeded",
+              "value": [
+                {
+                  "bytes": [123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34, 93, 44, 34, 115, 116, 97, 116, 101, 115, 34, 58, 91, 123, 34, 105, 116, 101, 109, 115, 34, 58, 123, 34, 35, 115, 101, 116, 34, 58, 91, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 49, 34, 125, 44, 116, 114, 117, 101, 93, 125, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107, 101, 110, 34, 58, 34, 105, 110, 105, 116, 34, 44, 34, 109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115, 34, 58, 123, 125, 125, 93, 125, 10],
+                  "name": "trace_2.itf.json",
+                  "trace": 2
+                }
+              ]
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DirectoryListing",
+              "value": {
+                "tag": "ListingSucceeded",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "GeneratedRead",
+              "value": {
+                "tag": "ReadSucceeded",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverFactory",
+              "value": {
+                "tag": "FactorySucceeded",
+                "value": 1
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverApply",
+              "value": {
+                "tag": "OperationApplied",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverObserve",
+              "value": {
+                "tag": "Observed",
+                "value": {
+                  "#bigint": "1"
+                }
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "ArtifactCandidatesUnavailable",
+              "value": "artifact root unavailable"
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "WorkspaceCleanup",
+              "value": {
+                "removal": {
+                  "tag": "RemoveComplete",
+                  "value": null
+                },
+                "result": {
+                  "tag": "StorageSucceeded",
+                  "value": null
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "calls": [
+          {
+            "call_id": 1,
+            "events": [
+              {
                 "tag": "SavedReadAttempted",
                 "value": {
                   "path": {
@@ -1074,6 +1649,621 @@
               "value": {
                 "tag": "OperationFailed",
                 "value": "driver rejected add"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "expected": {
+        "calls": [
+          {
+            "call_id": 1,
+            "events": [
+              {
+                "tag": "CommandPrepared",
+                "value": {
+                  "command": {
+                    "argv": [
+                      {
+                        "tag": "LiteralArgument",
+                        "value": "run"
+                      },
+                      {
+                        "tag": "ModelArgument",
+                        "value": {
+                          "tag": "AnchoredPath",
+                          "value": {
+                            "directory": "/models",
+                            "path": "sample.qnt"
+                          }
+                        }
+                      },
+                      {
+                        "tag": "LiteralArgument",
+                        "value": "--mbt"
+                      },
+                      {
+                        "tag": "StringOption",
+                        "value": {
+                          "flag": "--out-itf",
+                          "value": "trace_{seq}.itf.json"
+                        }
+                      },
+                      {
+                        "tag": "SeedOption",
+                        "value": [
+                          "4",
+                          "2"
+                        ]
+                      },
+                      {
+                        "tag": "IntegerOption",
+                        "value": {
+                          "flag": "--n-traces",
+                          "value": 1
+                        }
+                      },
+                      {
+                        "tag": "IntegerOption",
+                        "value": {
+                          "flag": "--max-samples",
+                          "value": 1
+                        }
+                      }
+                    ],
+                    "executable": {
+                      "tag": "DirectExecutable",
+                      "value": {
+                        "tag": "AbsoluteTarget",
+                        "value": "/bin/quint"
+                      }
+                    },
+                    "seed": [
+                      "4",
+                      "2"
+                    ],
+                    "workspace": 1
+                  },
+                  "drawnSeed": [
+                    "4",
+                    "2"
+                  ],
+                  "request": {
+                    "backend": {
+                      "tag": "CliDefault",
+                      "value": null
+                    },
+                    "callerDirectory": "/models",
+                    "config": {
+                      "tag": "Simulation",
+                      "value": {
+                        "init": {
+                          "tag": "CliDefault",
+                          "value": null
+                        },
+                        "maxSamples": {
+                          "tag": "CliDefault",
+                          "value": null
+                        },
+                        "maxSteps": {
+                          "tag": "CliDefault",
+                          "value": null
+                        },
+                        "nTraces": {
+                          "tag": "CliSpecified",
+                          "value": 1
+                        },
+                        "step": {
+                          "tag": "CliDefault",
+                          "value": null
+                        }
+                      }
+                    },
+                    "executable": {
+                      "tag": "ExecutablePath",
+                      "value": {
+                        "tag": "AbsolutePath",
+                        "value": "/bin/quint"
+                      }
+                    },
+                    "main": {
+                      "tag": "CliDefault",
+                      "value": null
+                    },
+                    "model": {
+                      "tag": "RelativePath",
+                      "value": "sample.qnt"
+                    },
+                    "seed": {
+                      "tag": "CliSpecified",
+                      "value": [
+                        "4",
+                        "2"
+                      ]
+                    },
+                    "workspace": 1
+                  },
+                  "target": {
+                    "tag": "ExplicitExecutable",
+                    "value": {
+                      "tag": "AbsoluteTarget",
+                      "value": "/bin/quint"
+                    }
+                  }
+                }
+              },
+              {
+                "tag": "WorkspaceReserved",
+                "value": {
+                  "artifactRoot": "default artifacts",
+                  "expectation": {
+                    "tag": "SimulationCount",
+                    "value": 1
+                  },
+                  "seed": [
+                    "4",
+                    "2"
+                  ],
+                  "workspace": 1
+                }
+              },
+              {
+                "tag": "ProcessStarted",
+                "value": {
+                  "artifactRoot": "default artifacts",
+                  "expectation": {
+                    "tag": "SimulationCount",
+                    "value": 1
+                  },
+                  "seed": [
+                    "4",
+                    "2"
+                  ],
+                  "workspace": 1
+                }
+              },
+              {
+                "tag": "ProcessExitedSuccessfully",
+                "value": {
+                  "artifactRoot": "default artifacts",
+                  "expectation": {
+                    "tag": "SimulationCount",
+                    "value": 1
+                  },
+                  "seed": [
+                    "4",
+                    "2"
+                  ],
+                  "workspace": 1
+                }
+              },
+              {
+                "tag": "GenerationCompleted",
+                "value": {
+                  "basenames": {
+                    "#map": [
+                      [
+                        2,
+                        "trace_2.itf.json"
+                      ]
+                    ]
+                  },
+                  "generation": {
+                    "artifactRoot": "default artifacts",
+                    "expectation": {
+                      "tag": "SimulationCount",
+                      "value": 1
+                    },
+                    "seed": [
+                      "4",
+                      "2"
+                    ],
+                    "workspace": 1
+                  },
+                  "result": {
+                    "tag": "ProcessSucceeded",
+                    "value": [2]
+                  }
+                }
+              },
+              {
+                "tag": "GeneratedReadAttempted",
+                "value": {
+                  "basename": "trace_2.itf.json",
+                  "path": {
+                    "tag": "WorkingFile",
+                    "value": {
+                      "trace": 2,
+                      "workspace": 1
+                    }
+                  },
+                  "position": {
+                    "trace": 2,
+                    "traceIndex": 0
+                  }
+                }
+              },
+              {
+                "tag": "FactoryCalled",
+                "value": {
+                  "trace": 2,
+                  "traceIndex": 0
+                }
+              },
+              {
+                "tag": "DriverCreated",
+                "value": {
+                  "driver": 1,
+                  "trace": {
+                    "trace": 2,
+                    "traceIndex": 0
+                  }
+                }
+              },
+              {
+                "tag": "OperationCalled",
+                "value": {
+                  "context": {
+                    "driver": 1,
+                    "position": {
+                      "stepIndex": 0,
+                      "trace": {
+                        "trace": 2,
+                        "traceIndex": 0
+                      }
+                    }
+                  },
+                  "operation": {
+                    "arguments": {},
+                    "name": "init"
+                  }
+                }
+              },
+              {
+                "tag": "ArtifactDirectoryTried",
+                "value": {
+                  "directory": 7,
+                  "result": {
+                    "tag": "DirectoryReserved",
+                    "value": null
+                  },
+                  "root": "default artifacts"
+                }
+              },
+              {
+                "tag": "SaveAttempted",
+                "value": {
+                  "position": {
+                    "trace": 2,
+                    "traceIndex": 0
+                  },
+                  "result": {
+                    "tag": "ArtifactSaved",
+                    "value": {
+                      "tag": "EvidenceFile",
+                      "value": {
+                        "directory": 7,
+                        "root": "default artifacts",
+                        "trace": 2
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "tag": "CleanupAttempted",
+                "value": {
+                  "result": {
+                    "tag": "StorageSucceeded",
+                    "value": null
+                  },
+                  "workspace": 1
+                }
+              }
+            ],
+            "outcome": {
+              "tag": "Failed",
+              "value": {
+                "cleanup": {
+                  "tag": "NoCleanupError",
+                  "value": null
+                },
+                "error": {
+                  "tag": "GeneratedDriverFailed",
+                  "value": {
+                    "artifacts": {
+                      "tag": "FromGeneration",
+                      "value": {
+                        "save": {
+                          "tag": "ArtifactSaved",
+                          "value": {
+                            "tag": "EvidenceFile",
+                            "value": {
+                              "directory": 7,
+                              "root": "default artifacts",
+                              "trace": 2
+                            }
+                          }
+                        },
+                        "seed": [
+                          "4",
+                          "2"
+                        ]
+                      }
+                    },
+                    "detail": {
+                      "cause": "driver failed",
+                      "location": {
+                        "tag": "AtStep",
+                        "value": {
+                          "stepIndex": 0,
+                          "trace": {
+                            "trace": 2,
+                            "traceIndex": 0
+                          }
+                        }
+                      },
+                      "stage": {
+                        "tag": "Apply",
+                        "value": null
+                      }
+                    },
+                    "position": {
+                      "trace": 2,
+                      "traceIndex": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "remaining_workspace_files": [],
+        "saved_files": [
+          {
+            "bytes": [123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34, 93, 44, 34, 115, 116, 97, 116, 101, 115, 34, 58, 91, 123, 34, 105, 116, 101, 109, 115, 34, 58, 123, 34, 35, 115, 101, 116, 34, 58, 91, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 49, 34, 125, 44, 116, 114, 117, 101, 93, 125, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107, 101, 110, 34, 58, 34, 105, 110, 105, 116, 34, 44, 34, 109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115, 34, 58, 123, 125, 125, 93, 125, 10],
+            "path": {
+              "tag": "EvidenceFile",
+              "value": {
+                "directory": 7,
+                "root": "default artifacts",
+                "trace": 2
+              }
+            }
+          }
+        ]
+      },
+      "input_files": [],
+      "name": "generatedDriverFailureSaved",
+      "schedule": [
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Start",
+            "value": {
+              "tag": "RunQuint",
+              "value": {
+                "artifactRoot": "default artifacts",
+                "cli": {
+                  "backend": {
+                    "tag": "CliDefault",
+                    "value": null
+                  },
+                  "callerDirectory": "/models",
+                  "config": {
+                    "tag": "Simulation",
+                    "value": {
+                      "init": {
+                        "tag": "CliDefault",
+                        "value": null
+                      },
+                      "maxSamples": {
+                        "tag": "CliDefault",
+                        "value": null
+                      },
+                      "maxSteps": {
+                        "tag": "CliDefault",
+                        "value": null
+                      },
+                      "nTraces": {
+                        "tag": "CliSpecified",
+                        "value": 1
+                      },
+                      "step": {
+                        "tag": "CliDefault",
+                        "value": null
+                      }
+                    }
+                  },
+                  "executable": {
+                    "tag": "ExecutablePath",
+                    "value": {
+                      "tag": "AbsolutePath",
+                      "value": "/bin/quint"
+                    }
+                  },
+                  "main": {
+                    "tag": "CliDefault",
+                    "value": null
+                  },
+                  "model": {
+                    "tag": "RelativePath",
+                    "value": "sample.qnt"
+                  },
+                  "seed": {
+                    "tag": "CliSpecified",
+                    "value": [
+                      "4",
+                      "2"
+                    ]
+                  },
+                  "workspace": 1
+                },
+                "drawnSeed": [
+                  "4",
+                  "2"
+                ],
+                "selection": {
+                  "actionPath": [],
+                  "statePath": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "ChildStarted",
+              "value": null
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "ChildSucceeded",
+              "value": [
+                {
+                  "bytes": [123, 34, 118, 97, 114, 115, 34, 58, 91, 34, 105, 116, 101, 109, 115, 34, 93, 44, 34, 115, 116, 97, 116, 101, 115, 34, 58, 91, 123, 34, 105, 116, 101, 109, 115, 34, 58, 123, 34, 35, 115, 101, 116, 34, 58, 91, 123, 34, 35, 98, 105, 103, 105, 110, 116, 34, 58, 34, 49, 34, 125, 44, 116, 114, 117, 101, 93, 125, 44, 34, 109, 98, 116, 58, 58, 97, 99, 116, 105, 111, 110, 84, 97, 107, 101, 110, 34, 58, 34, 105, 110, 105, 116, 34, 44, 34, 109, 98, 116, 58, 58, 110, 111, 110, 100, 101, 116, 80, 105, 99, 107, 115, 34, 58, 123, 125, 125, 93, 125, 10],
+                  "name": "trace_2.itf.json",
+                  "trace": 2
+                }
+              ]
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DirectoryListing",
+              "value": {
+                "tag": "ListingSucceeded",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "GeneratedRead",
+              "value": {
+                "tag": "ReadSucceeded",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverFactory",
+              "value": {
+                "tag": "FactorySucceeded",
+                "value": 1
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "DriverApply",
+              "value": {
+                "tag": "OperationFailed",
+                "value": "driver failed"
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "ArtifactCandidateList",
+              "value": [7]
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "ArtifactReservation",
+              "value": {
+                "tag": "StorageSucceeded",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "EvidenceCopyStarted",
+              "value": null
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "EvidenceCopyWritten",
+              "value": 120
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "EvidenceCopyFinished",
+              "value": {
+                "tag": "StorageSucceeded",
+                "value": null
+              }
+            }
+          }
+        },
+        {
+          "call_id": 1,
+          "input": {
+            "tag": "Respond",
+            "value": {
+              "tag": "WorkspaceCleanup",
+              "value": {
+                "removal": {
+                  "tag": "RemoveComplete",
+                  "value": null
+                },
+                "result": {
+                  "tag": "StorageSucceeded",
+                  "value": null
+                }
               }
             }
           }
