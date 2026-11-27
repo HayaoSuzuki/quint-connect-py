@@ -2,7 +2,14 @@ from collections.abc import Sequence
 from os import PathLike
 from pathlib import Path
 
-from . import Action, QuintValue, _DriverContextFactory, _RunRequest, _SelectionPaths
+from . import (
+    Action,
+    ActionDriver,
+    QuintValue,
+    _DriverContextFactory,
+    _ReplayOptions,
+    _RunRequest,
+)
 from ._enums import DriverStage, QuintStage, WorkspaceStage
 
 type _Path = str | PathLike[str]
@@ -39,6 +46,7 @@ class StateMismatchError(AssertionError):
     action: Action
     expected: QuintValue
     actual: QuintValue
+    diff: str
     seed: int | None
     artifact_path: Path | None
     artifact_error: OSError | None
@@ -74,13 +82,13 @@ class IncompleteGenerationError(Exception):
 
 def replay(
     paths: Sequence[_Path],
-    context_factory: _DriverContextFactory,
-    selection: _SelectionPaths,
+    context_factory: _DriverContextFactory[ActionDriver],
+    selection: _ReplayOptions,
     /,
 ) -> None: ...
 def run(
     request: _RunRequest,
-    context_factory: _DriverContextFactory,
-    selection: _SelectionPaths,
+    context_factory: _DriverContextFactory[ActionDriver],
+    selection: _ReplayOptions,
     /,
 ) -> None: ...

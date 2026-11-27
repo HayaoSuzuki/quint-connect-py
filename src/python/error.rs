@@ -93,6 +93,7 @@ fn trace_failure(py: Python<'_>, types: &Types, failure: FailedTrace<PyErr>) -> 
                 DriverFailureSite::Factory => "FACTORY",
                 DriverFailureSite::Apply(_) => "APPLY",
                 DriverFailureSite::Observe(_) => "OBSERVE",
+                DriverFailureSite::Compare(_) => "COMPARE",
                 DriverFailureSite::Exit => "EXIT",
             };
             let error =
@@ -139,17 +140,26 @@ pub(super) fn mismatch_exception(
     trace: &TraceFile,
     mismatch: &Mismatch,
 ) -> PyResult<PyErr> {
-    let error = StateMismatchError::new_err(format!(
+    let expected = types.write(py, &mismatch.expected)?;
+    let actual = types.write(py, &mismatch.actual)?;
+    let diff = super::diagnostics::state_diff(&expected, &actual);
+    let mut message = format!(
         "{}: state differs at step {}",
         trace.display_path.display(),
         mismatch.step_index
-    ));
+    );
+    if !diff.is_empty() {
+        message.push('\n');
+        message.push_str(&diff);
+    }
+    let error = StateMismatchError::new_err(message);
     trace_attributes(&error, py, trace, Some(mismatch.step_index))?;
     trace_failure_defaults(py, &error)?;
     let value = error.value(py);
-    value.setattr("action", types.action(py, &mismatch.step.action)?)?;
-    value.setattr("expected", types.write(py, &mismatch.step.expected)?)?;
-    value.setattr("actual", types.write(py, &mismatch.actual)?)?;
+    value.setattr("action", types.action(py, &mismatch.action)?)?;
+    value.setattr("expected", expected)?;
+    value.setattr("actual", actual)?;
+    value.setattr("diff", diff)?;
     Ok(error)
 }
 

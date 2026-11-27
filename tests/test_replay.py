@@ -1,4 +1,5 @@
 import json
+import logging
 import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
@@ -15,6 +16,7 @@ from quint_connect import (
     EmptyTraceError,
     InvalidTraceError,
     QuintValue,
+    StateComparison,
     StateMismatchError,
     replay,
 )
@@ -42,6 +44,128 @@ class ConstantDriver:
 
     def observe(self) -> QuintValue:
         return self.value
+
+
+def test_replay_without_observation(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state({"#unserializable": "Int"})])
+    calls: list[str] = []
+
+    class ActionDriver:
+        def step(self, action: Action, /) -> None:
+            calls.append(action.name)
+
+    replay(path, ActionDriver, comparison=None)
+
+    assert calls == ["init"]
+
+
+def test_operation_only_still_validates_operations_before_creation(
+    tmp_path: Path,
+) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True), {"state": True}])
+
+    def factory() -> ConstantDriver:
+        pytest.fail("invalid operations must be rejected before creating a driver")
+
+    with pytest.raises(InvalidTraceError) as caught:
+        replay(path, factory, comparison=None)
+
+    assert caught.value.step_index == 1
+
+
+def test_replay_transforms_expected_state(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state("MODEL")])
+
+    def lower(value: QuintValue) -> str:
+        assert isinstance(value, str)
+        return value.lower()
+
+    replay(
+        path,
+        lambda: ConstantDriver("model"),
+        state_path=("state",),
+        comparison=StateComparison(transform_expected=lower),
+    )
+
+
+def test_replay_uses_custom_equality(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state({"#bigint": "10"})])
+
+    def near(expected: QuintValue, actual: QuintValue) -> bool:
+        assert type(expected) is int
+        assert type(actual) is int
+        return abs(expected - actual) <= 1
+
+    replay(
+        path,
+        lambda: ConstantDriver(11),
+        state_path=("state",),
+        comparison=StateComparison(equals=near),
+    )
+
+
+def test_mismatch_reports_the_values_used_by_the_comparator(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state("MODEL")])
+    comparison = StateComparison(
+        transform_expected=lambda _value: "model",
+        equals=lambda _expected, _actual: False,
+    )
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(
+            path,
+            lambda: ConstantDriver("model"),
+            state_path=("state",),
+            comparison=comparison,
+        )
+
+    assert caught.value.expected == "model"
+    assert caught.value.actual == "model"
+    assert caught.value.diff == ""
+
+
+def test_replay_preserves_comparison_exception(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    failure = RuntimeError("comparison failed")
+
+    def compare(_expected: QuintValue, _actual: QuintValue) -> bool:
+        raise failure
+
+    with pytest.raises(DriverError) as caught:
+        replay(
+            path,
+            lambda: ConstantDriver(True),
+            state_path=("state",),
+            comparison=StateComparison(equals=compare),
+        )
+
+    assert caught.value.stage is DriverStage.COMPARE
+    assert caught.value.step_index == 0
+    assert caught.value.__cause__ is failure
+
+
+def test_state_mismatch_displays_a_diff(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state({"answer": True})])
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, lambda: ConstantDriver({"answer": False}), state_path=("state",))
+
+    assert "-{'answer': True}" in caught.value.diff
+    assert "+{'answer': False}" in caught.value.diff
+    assert caught.value.diff in str(caught.value)
+
+
+def test_replay_logs_trace_step_and_observation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+
+    with caplog.at_level(logging.DEBUG, logger="quint_connect"):
+        replay(path, lambda: ConstantDriver(True), state_path=("state",))
+
+    assert any("trace 0" in message for message in caplog.messages)
+    assert any("step 0" in message and "init" in message for message in caplog.messages)
+    assert any("observed True" in message for message in caplog.messages)
 
 
 @given(st.integers(min_value=-(2**512), max_value=2**512))

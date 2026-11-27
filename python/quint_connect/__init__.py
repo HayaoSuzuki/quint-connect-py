@@ -7,6 +7,7 @@ from os import PathLike
 from typing import Protocol, TypedDict, cast, overload
 
 from . import _native
+from ._diagnostics import detail_logging_enabled, logging_enabled
 from ._enums import Backend, DriverStage, QuintStage, WorkspaceStage
 from ._native import (
     DriverError,
@@ -20,6 +21,7 @@ from ._native import (
 
 __all__ = [
     "Action",
+    "ActionDriver",
     "Backend",
     "Driver",
     "DriverError",
@@ -28,12 +30,14 @@ __all__ = [
     "IncompleteGenerationError",
     "InvalidTraceError",
     "NamedTest",
+    "NamedTests",
     "QuintError",
     "QuintMap",
     "QuintSet",
     "QuintStage",
     "QuintValue",
     "Simulation",
+    "StateComparison",
     "StateMismatchError",
     "WorkspaceError",
     "WorkspaceStage",
@@ -84,11 +88,15 @@ class Action:
     arguments: dict[str, QuintValue]
 
 
-class Driver(Protocol):
-    """Apply a model operation and report the implementation state."""
+class ActionDriver(Protocol):
+    """Apply model operations in an operation-only replay."""
 
     def step(self, action: Action, /) -> None:
         """Apply the operation to this trace state."""
+
+
+class Driver(ActionDriver, Protocol):
+    """Apply model operations and observe implementation state."""
 
     def observe(self) -> QuintValue:
         """Return the state that the trace compares."""
@@ -119,9 +127,45 @@ class NamedTest(_ModelConfig):
     test: str = field(kw_only=True)
 
 
-class _SelectionPaths(TypedDict):
+@dataclass(frozen=True, slots=True)
+class NamedTests(_ModelConfig):
+    """Generate traces for the tests that match a Quint CLI regular expression."""
+
+    spec: FilePath
+    pattern: str = field(kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class StateComparison:
+    """Transform the expected value before comparing it with the observed value."""
+
+    transform_expected: Callable[[QuintValue], QuintValue] | None = None
+    equals: Callable[[QuintValue, QuintValue], bool] | None = None
+
+
+_DEFAULT_COMPARISON = StateComparison()
+
+
+class _ReplayOptions(TypedDict):
     action_path: Sequence[str]
     state_path: Sequence[str]
+    comparison: StateComparison | None
+    log_replay: bool
+    log_steps: bool
+
+
+def _replay_options(
+    action_path: Sequence[str],
+    state_path: Sequence[str],
+    comparison: StateComparison | None,
+) -> _ReplayOptions:
+    return {
+        "action_path": action_path,
+        "state_path": state_path,
+        "comparison": comparison,
+        "log_replay": logging_enabled(),
+        "log_steps": detail_logging_enabled(),
+    }
 
 
 class _SimulationMode(TypedDict):
@@ -135,12 +179,19 @@ class _NamedTestMode(TypedDict):
     test: str
 
 
+class _PatternTestMode(TypedDict):
+    pattern: str
+
+
+type _GenerationMode = _SimulationMode | _NamedTestMode | _PatternTestMode
+
+
 class _RunRequest(TypedDict):
     spec: FilePath
     quint: FilePath
     main: str | None
     max_samples: int | None
-    mode: _SimulationMode | _NamedTestMode
+    mode: _GenerationMode
     seed: int | None
     backend: str | None
     artifact_dir: FilePath | None
@@ -155,14 +206,14 @@ def _unsigned(name: str, value: int | None) -> int | None:
     return value
 
 
-type _DriverFactory = Callable[[], Driver]
-type _DriverContextFactory = Callable[[], AbstractContextManager[Driver]]
+type _DriverFactory[T: ActionDriver] = Callable[[], T]
+type _DriverContextFactory[T: ActionDriver] = Callable[[], AbstractContextManager[T]]
 
 
 def _context_factory(
-    factory: _DriverFactory | None,
-    context: _DriverContextFactory | None,
-) -> _DriverContextFactory:
+    factory: _DriverFactory[ActionDriver] | None,
+    context: _DriverContextFactory[ActionDriver] | None,
+) -> _DriverContextFactory[ActionDriver]:
     if factory is not None and context is None:
         return lambda: nullcontext(factory())
     if context is not None and factory is None:
@@ -174,9 +225,10 @@ def _context_factory(
 @overload
 def replay(
     traces: FilePath | Sequence[FilePath],
-    driver_factory: _DriverFactory,
+    driver_factory: _DriverFactory[Driver],
     *,
     driver_context: None = None,
+    comparison: StateComparison | None = _DEFAULT_COMPARISON,
     action_path: Sequence[str] = (),
     state_path: Sequence[str] = (),
 ) -> None: ...
@@ -187,34 +239,61 @@ def replay(
     traces: FilePath | Sequence[FilePath],
     driver_factory: None = None,
     *,
-    driver_context: _DriverContextFactory,
+    driver_context: _DriverContextFactory[Driver],
+    comparison: StateComparison | None = _DEFAULT_COMPARISON,
     action_path: Sequence[str] = (),
     state_path: Sequence[str] = (),
 ) -> None: ...
 
 
+@overload
 def replay(
     traces: FilePath | Sequence[FilePath],
-    driver_factory: _DriverFactory | None = None,
+    driver_factory: _DriverFactory[ActionDriver],
     *,
-    driver_context: _DriverContextFactory | None = None,
+    driver_context: None = None,
+    comparison: None,
     action_path: Sequence[str] = (),
     state_path: Sequence[str] = (),
+) -> None: ...
+
+
+@overload
+def replay(
+    traces: FilePath | Sequence[FilePath],
+    driver_factory: None = None,
+    *,
+    driver_context: _DriverContextFactory[ActionDriver],
+    comparison: None,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+) -> None: ...
+
+
+def replay(  # noqa: PLR0913 - The documented options are keyword-only.
+    traces: FilePath | Sequence[FilePath],
+    driver_factory: _DriverFactory[ActionDriver] | None = None,
+    *,
+    driver_context: _DriverContextFactory[ActionDriver] | None = None,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+    comparison: StateComparison | None = _DEFAULT_COMPARISON,
 ) -> None:
     """Replay each saved trace with a fresh driver and close its context."""
     paths = (
         [cast("FilePath", traces)] if isinstance(traces, (str, PathLike)) else traces
     )
-    selection: _SelectionPaths = {"action_path": action_path, "state_path": state_path}
-    _native.replay(paths, _context_factory(driver_factory, driver_context), selection)
+    options = _replay_options(action_path, state_path, comparison)
+    _native.replay(paths, _context_factory(driver_factory, driver_context), options)
 
 
 @overload
 def run(
-    config: Simulation | NamedTest,
-    driver_factory: _DriverFactory,
+    config: Simulation | NamedTest | NamedTests,
+    driver_factory: _DriverFactory[Driver],
     *,
     driver_context: None = None,
+    comparison: StateComparison | None = _DEFAULT_COMPARISON,
     quint: FilePath,
     seed: int | None = None,
     backend: Backend | None = None,
@@ -226,10 +305,43 @@ def run(
 
 @overload
 def run(
-    config: Simulation | NamedTest,
+    config: Simulation | NamedTest | NamedTests,
     driver_factory: None = None,
     *,
-    driver_context: _DriverContextFactory,
+    driver_context: _DriverContextFactory[Driver],
+    comparison: StateComparison | None = _DEFAULT_COMPARISON,
+    quint: FilePath,
+    seed: int | None = None,
+    backend: Backend | None = None,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+    artifact_dir: FilePath | None = None,
+) -> None: ...
+
+
+@overload
+def run(
+    config: Simulation | NamedTest | NamedTests,
+    driver_factory: _DriverFactory[ActionDriver],
+    *,
+    driver_context: None = None,
+    comparison: None,
+    quint: FilePath,
+    seed: int | None = None,
+    backend: Backend | None = None,
+    action_path: Sequence[str] = (),
+    state_path: Sequence[str] = (),
+    artifact_dir: FilePath | None = None,
+) -> None: ...
+
+
+@overload
+def run(
+    config: Simulation | NamedTest | NamedTests,
+    driver_factory: None = None,
+    *,
+    driver_context: _DriverContextFactory[ActionDriver],
+    comparison: None,
     quint: FilePath,
     seed: int | None = None,
     backend: Backend | None = None,
@@ -240,15 +352,16 @@ def run(
 
 
 def run(  # noqa: PLR0913 - The documented options are keyword-only.
-    config: Simulation | NamedTest,
-    driver_factory: _DriverFactory | None = None,
+    config: Simulation | NamedTest | NamedTests,
+    driver_factory: _DriverFactory[ActionDriver] | None = None,
     *,
-    driver_context: _DriverContextFactory | None = None,
+    driver_context: _DriverContextFactory[ActionDriver] | None = None,
     quint: FilePath,
     seed: int | None = None,
     backend: Backend | None = None,
     action_path: Sequence[str] = (),
     state_path: Sequence[str] = (),
+    comparison: StateComparison | None = _DEFAULT_COMPARISON,
     artifact_dir: FilePath | None = None,
 ) -> None:
     """Generate Quint traces and replay each with its own driver lifetime."""
@@ -261,7 +374,7 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
         if traces is None:
             message = "n_traces must be an integer"
             raise ValueError(message)
-        mode: _SimulationMode | _NamedTestMode = {
+        mode: _GenerationMode = {
             "init": config.init,
             "step": config.step,
             "n_traces": traces,
@@ -269,8 +382,10 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
         }
     elif isinstance(config, NamedTest):
         mode = _NamedTestMode(test=config.test)
+    elif isinstance(config, NamedTests):
+        mode = _PatternTestMode(pattern=config.pattern)
     else:
-        message = "config must be Simulation or NamedTest"
+        message = "config must be Simulation, NamedTest, or NamedTests"
         raise TypeError(message)
     request: _RunRequest = {
         "spec": config.spec,
@@ -282,5 +397,5 @@ def run(  # noqa: PLR0913 - The documented options are keyword-only.
         "backend": None if backend is None else backend.value,
         "artifact_dir": artifact_dir,
     }
-    selection: _SelectionPaths = {"action_path": action_path, "state_path": state_path}
-    _native.run(request, _context_factory(driver_factory, driver_context), selection)
+    options = _replay_options(action_path, state_path, comparison)
+    _native.run(request, _context_factory(driver_factory, driver_context), options)

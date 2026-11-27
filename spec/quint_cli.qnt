@@ -20,7 +20,11 @@ module quint_cli {
     maxSamples: CliOption[int],
   }
 
-  type QuintConfig = Simulation(SimulationOptions) | NamedTestMode(NamedTestOptions)
+  type PatternTestOptions = { pattern: List[int], maxSamples: CliOption[int] }
+  type QuintConfig =
+    | Simulation(SimulationOptions)
+    | NamedTestMode(NamedTestOptions)
+    | PatternTestMode(PatternTestOptions)
 
   // The adapter classifies paths using the host platform's path syntax.
   type InputPath = AbsolutePath(str) | RelativePath(str)
@@ -192,21 +196,25 @@ module quint_cli {
           })
         }
         | NamedTestMode(options) =>
-          if (not(validOptionalLimit(options.maxSamples, 1))) InvalidSampleLimit
-          else CommandReady({
-            executable: executable,
-            workspace: request.workspace,
-            seed: seed,
-            argv: List(LiteralArgument("test"), model)
-              .concat(common)
-              .append(MatchOption(exactTestPattern(options.name)))
-              .concat(optionArgument(options.maxSamples, value =>
-                IntegerOption({ flag: "--max-samples", value: value })
-              )),
-          })
+          testCommand(executable, request.workspace, seed, model, common,
+            exactTestPattern(options.name), options.maxSamples)
+        | PatternTestMode(options) =>
+          testCommand(executable, request.workspace, seed, model, common,
+            options.pattern, options.maxSamples)
       }
     }
   }
+
+  pure def testCommand(executable: LaunchExecutable, workspace: int, seed: SeedDigits,
+    model: CliArgument, common: List[CliArgument], pattern: List[int], samples: CliOption[int]): CommandResult =
+    if (not(validOptionalLimit(samples, 1))) InvalidSampleLimit
+    else CommandReady({
+      executable: executable, workspace: workspace, seed: seed,
+      argv: List(LiteralArgument("test"), model)
+        .concat(common)
+        .append(MatchOption(pattern))
+        .concat(optionArgument(samples, value => IntegerOption({ flag: "--max-samples", value: value }))),
+    })
 
   // The admitted limits are nonnegative and have at most 16 decimal digits.
   pure def limitCodePoints(value: int): List[int] =

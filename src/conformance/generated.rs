@@ -477,12 +477,14 @@ fn request(value: &Json) -> Request {
             steps: option(&fields["maxSteps"], number),
         },
         Some("NamedTestMode") => Mode::NamedTest {
-            name: fields["name"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|point| char::from_u32(u32::try_from(number(point)).unwrap()).unwrap())
-                .collect(),
+            filter: crate::cli::TestFilter::Name(
+                fields["name"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|point| char::from_u32(u32::try_from(number(point)).unwrap()).unwrap())
+                    .collect(),
+            ),
             samples,
         },
         _ => panic!("invalid mode {config}"),
@@ -657,7 +659,7 @@ fn spawn_worker(call_id: u64, start: Json, artifacts: SharedArtifacts) -> Worker
         let request = request(&start);
         let selection = Selection {
             action_path: text_list(&start["selection"]["actionPath"]),
-            state_path: text_list(&start["selection"]["statePath"]),
+            state_path: Some(text_list(&start["selection"]["statePath"])),
         };
         let caller = string(&start["cli"]["callerDirectory"]);
         let seed = decode_seed(&start["drawnSeed"]);

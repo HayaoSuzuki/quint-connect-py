@@ -43,9 +43,14 @@ pub enum Mode {
         steps: Option<u64>,
     },
     NamedTest {
-        name: String,
+        filter: TestFilter,
         samples: Option<u64>,
     },
+}
+
+pub enum TestFilter {
+    Name(String),
+    Pattern(String),
 }
 
 pub struct Request {
@@ -126,7 +131,7 @@ pub fn plan(
             optional_argument(&mut arguments, "--max-steps", *steps);
             (arguments, Some(*traces))
         }
-        Mode::NamedTest { name, samples } => {
+        Mode::NamedTest { filter, samples } => {
             if samples.is_some_and(|value| !(1..=LIMIT).contains(&value)) {
                 return Err(InvalidRequest::SampleLimit);
             }
@@ -135,7 +140,11 @@ pub fn plan(
             }
             let mut arguments = vec!["test".into(), model];
             arguments.extend(common);
-            arguments.push(format!("--match={}", exact_pattern(name)).into());
+            let pattern = match filter {
+                TestFilter::Name(name) => exact_pattern(name),
+                TestFilter::Pattern(pattern) => pattern.clone(),
+            };
+            arguments.push(format!("--match={pattern}").into());
             optional_argument(&mut arguments, "--max-samples", *samples);
             (arguments, None)
         }
@@ -331,11 +340,13 @@ mod tests {
         assert_eq!(prepared.seed, u64::MAX);
     }
 
-    #[test]
-    fn named_test_escapes_regexp_metacharacters_inside_one_argument() {
+    #[rstest]
+    #[case::literal(TestFilter::Name("a+b[ü]".into()), r"--match=^a\+b\[ü\]$")]
+    #[case::regex(TestFilter::Pattern("^(alpha|beta)Test$".into()), "--match=^(alpha|beta)Test$")]
+    fn named_test_sends_one_match_argument(#[case] filter: TestFilter, #[case] argument: &str) {
         let mut request = simulation(1, None, None);
         request.mode = Mode::NamedTest {
-            name: "a+b[ü]".into(),
+            filter,
             samples: Some(5),
         };
         request.main = Some("m a=in".into());
@@ -354,7 +365,7 @@ mod tests {
                 "--out-itf=trace_{seq}.itf.json",
                 "--seed=18446744073709551615",
                 "--main=m a=in",
-                r"--match=^a\+b\[ü\]$",
+                argument,
                 "--max-samples=5",
             ]
         );

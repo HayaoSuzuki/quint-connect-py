@@ -4,10 +4,20 @@ use self::json::{Document, Node, NodeId};
 use crate::value::{Value, with_stack};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Selection {
     pub action_path: Vec<String>,
-    pub state_path: Vec<String>,
+    /// None selects operation-only replay and leaves expected values undecoded.
+    pub state_path: Option<Vec<String>>,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            action_path: Vec::new(),
+            state_path: Some(Vec::new()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,7 +29,7 @@ pub struct Action {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TraceStep {
     pub action: Action,
-    pub expected: Value,
+    pub expected: Option<Value>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -99,17 +109,11 @@ fn decode_step(
             decode_value(doc, inner).ok_or("invalid operation argument")?,
         );
     }
-    let expected = if selection.state_path.is_empty() {
-        fields
-            .iter()
-            .filter(|(name, _)| !matches!(name.as_str(), "#meta" | ACTION | PICKS))
-            .map(|(key, &id)| Some((key.clone(), decode_value(doc, id)?)))
-            .collect::<Option<_>>()
-            .map(Value::Record)
-    } else {
-        pick_path(doc, id, &selection.state_path).and_then(|id| decode_value(doc, id))
-    }
-    .ok_or("invalid expected value")?;
+    let expected = selection
+        .state_path
+        .as_deref()
+        .map(|path| expected_value(doc, id, fields, path).ok_or("invalid expected value"))
+        .transpose()?;
     Ok(TraceStep {
         action: Action {
             name: name.to_owned(),
@@ -117,6 +121,19 @@ fn decode_step(
         },
         expected,
     })
+}
+
+fn expected_value(doc: &Document, id: NodeId, fields: &Fields, path: &[String]) -> Option<Value> {
+    if path.is_empty() {
+        fields
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "#meta" | ACTION | PICKS))
+            .map(|(key, &id)| Some((key.clone(), decode_value(doc, id)?)))
+            .collect::<Option<_>>()
+            .map(Value::Record)
+    } else {
+        pick_path(doc, id, path).and_then(|id| decode_value(doc, id))
+    }
 }
 
 fn operation<'a>(
@@ -272,7 +289,7 @@ mod tests {
     fn accepts_large_exponent_in_unselected_metadata() {
         let bytes = br##"{"vars":["n"],"states":[{"n":{"#bigint":"-00"},"mbt::actionTaken":"","mbt::nondetPicks":{}}],"unused":1e900000000000000000000000}"##;
         let selection = Selection {
-            state_path: vec!["n".into()],
+            state_path: Some(vec!["n".into()]),
             ..Selection::default()
         };
 
@@ -285,7 +302,7 @@ mod tests {
                     name: String::new(),
                     arguments: BTreeMap::new()
                 },
-                expected: Value::Integer(0.into()),
+                expected: Some(Value::Integer(0.into())),
             }]
         );
     }

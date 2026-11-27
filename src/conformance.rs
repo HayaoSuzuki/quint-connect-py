@@ -228,6 +228,8 @@ impl Script {
                     json!({"context": context.json(), "expected": value_json(expected)}),
                 );
             }
+            #[cfg(feature = "python")]
+            ReplayEvent::Observed(..) => {}
         }
     }
 }
@@ -334,6 +336,7 @@ fn driver_stage(stage: DriverFailureSite) -> Json {
         DriverFailureSite::Factory => "Factory",
         DriverFailureSite::Apply(_) => "Apply",
         DriverFailureSite::Observe(_) => "Observe",
+        DriverFailureSite::Compare(_) => "Compare",
         DriverFailureSite::Exit => "Exit",
     })
 }
@@ -341,7 +344,7 @@ fn driver_stage(stage: DriverFailureSite) -> Json {
 fn mismatch_json(trace: FixtureTrace<'_>, mismatch: &Mismatch) -> Json {
     json!({
         "position": trace.position().step(mismatch.step_index),
-        "step": {"operation": action_json(&mismatch.step.action), "expected": value_json(&mismatch.step.expected)},
+        "step": {"operation": action_json(&mismatch.action), "expected": value_json(&mismatch.expected)},
         "actual": value_json(&mismatch.actual),
     })
 }
@@ -421,7 +424,7 @@ fn assert_saved_case(name: &str) {
     let files = saved_files(&paths, caller);
     let selection = Selection {
         action_path: text_list(&request["selection"]["actionPath"]),
-        state_path: text_list(&request["selection"]["statePath"]),
+        state_path: Some(text_list(&request["selection"]["statePath"])),
     };
     let input_files = case["input_files"]
         .as_array()

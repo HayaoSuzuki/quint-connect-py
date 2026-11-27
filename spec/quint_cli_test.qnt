@@ -153,6 +153,24 @@ module quint_cli_test {
     })
   }
 
+  run patternTestForwardsOneUnescapedMatchArgumentTest = {
+    val pattern = List(94, 40, 65, 124, 66, 41, 36)
+    val request = {
+      ...baseRequest,
+      config: PatternTestMode({ pattern: pattern, maxSamples: CliDefault }),
+    }
+    match quintCommand(request, List("5")) {
+      | CommandReady(command) => command.argv == List(
+          LiteralArgument("test"),
+          ModelArgument(AbsoluteTarget(modelPath)),
+          StringOption({ flag: "--out-itf", value: "trace_{seq}.itf.json" }),
+          SeedOption(List("5")),
+          MatchOption(pattern),
+        )
+      | _ => false
+    }
+  }
+
   run namedTestUsesQuintDefaultSampleLimitTest = {
     val request = {
       ...baseRequest,
