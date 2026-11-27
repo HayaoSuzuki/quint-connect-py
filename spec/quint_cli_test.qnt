@@ -9,9 +9,13 @@ module quint_cli_test {
     maxSteps: CliDefault,
   }
 
+  pure val executablePath = "/chosen bin/quint"
+  pure val modelPath = "/project/models/counter test.qnt"
+
   pure val baseRequest: CliRequest = {
-    executable: "/chosen bin/quint",
-    model: "/project/models/counter test.qnt",
+    callerDirectory: "/caller",
+    executable: ExecutablePath(AbsolutePath(executablePath)),
+    model: AbsolutePath(modelPath),
     workspace: 1,
     main: CliDefault,
     backend: CliDefault,
@@ -21,12 +25,12 @@ module quint_cli_test {
 
   run simulationDefaultsTest =
     quintCommand(baseRequest, List("0")) == CommandReady({
-      executable: "/chosen bin/quint",
+      executable: DirectExecutable(AbsoluteTarget(executablePath)),
       workspace: 1,
       seed: List("0"),
       argv: List(
         LiteralArgument("run"),
-        LiteralArgument("/project/models/counter test.qnt"),
+        ModelArgument(AbsoluteTarget(modelPath)),
         LiteralArgument("--mbt"),
         StringOption({ flag: "--out-itf", value: "trace_{seq}.itf.json" }),
         SeedOption(List("0")),
@@ -34,6 +38,46 @@ module quint_cli_test {
         IntegerOption({ flag: "--max-samples", value: 1 }),
       ),
     })
+
+  run relativePathsAreAnchoredIndependentlyOfWorkspaceTest =
+    Set("/project A", "/project B").forall(directory =>
+      Set(1, 2).forall(workspace => {
+        val request = {
+          ...baseRequest,
+          callerDirectory: directory,
+          executable: ExecutablePath(RelativePath("../tools/quint")),
+          model: RelativePath("counter test.qnt"),
+          workspace: workspace,
+        }
+        match quintCommand(request, List("0")) {
+          | CommandReady(command) => and {
+            command.workspace == workspace,
+            command.executable ==
+              DirectExecutable(AnchoredPath({ directory: directory, path: "../tools/quint" })),
+            command.argv.nth(1) ==
+              ModelArgument(AnchoredPath({ directory: directory, path: "counter test.qnt" })),
+          }
+          | _ => false
+        }
+      })
+    )
+
+  run bareCommandUsesCallerPathTest = {
+    val request = {
+      ...baseRequest,
+      callerDirectory: "/named tests",
+      executable: BareCommand("quint"),
+      model: RelativePath("models/sample.qnt"),
+      config: NamedTestMode({ name: List(65), maxSamples: CliDefault }),
+    }
+    match quintCommand(request, List("0")) {
+      | CommandReady(command) => and {
+        command.executable == SearchCallerPath({ directory: "/named tests", name: "quint" }),
+        command.argv.nth(1) == ModelArgument(AnchoredPath({ directory: "/named tests", path: "models/sample.qnt" })),
+      }
+      | _ => false
+    }
+  }
 
   run configuredSimulationTest = {
     val options = {
@@ -51,12 +95,12 @@ module quint_cli_test {
       seed: CliSpecified(List("4", "2")),
     }
     quintCommand(request, List("invalid")) == CommandReady({
-      executable: baseRequest.executable,
+      executable: DirectExecutable(AbsoluteTarget(executablePath)),
       workspace: baseRequest.workspace,
       seed: List("4", "2"),
       argv: List(
         LiteralArgument("run"),
-        LiteralArgument(baseRequest.model),
+        ModelArgument(AbsoluteTarget(modelPath)),
         LiteralArgument("--mbt"),
         StringOption({ flag: "--out-itf", value: "trace_{seq}.itf.json" }),
         SeedOption(List("4", "2")),
@@ -94,12 +138,12 @@ module quint_cli_test {
       config: NamedTestMode({ name: List(65, 46, 91, 98, 93), maxSamples: CliSpecified(1) }),
     }
     quintCommand(request, List("5")) == CommandReady({
-      executable: baseRequest.executable,
+      executable: DirectExecutable(AbsoluteTarget(executablePath)),
       workspace: baseRequest.workspace,
       seed: List("5"),
       argv: List(
         LiteralArgument("test"),
-        LiteralArgument(baseRequest.model),
+        ModelArgument(AbsoluteTarget(modelPath)),
         StringOption({ flag: "--out-itf", value: "trace_{seq}.itf.json" }),
         SeedOption(List("5")),
         StringOption({ flag: "--backend", value: "rust" }),
@@ -115,12 +159,12 @@ module quint_cli_test {
       config: NamedTestMode({ name: List(65), maxSamples: CliDefault }),
     }
     quintCommand(request, List("0")) == CommandReady({
-      executable: baseRequest.executable,
+      executable: DirectExecutable(AbsoluteTarget(executablePath)),
       workspace: baseRequest.workspace,
       seed: List("0"),
       argv: List(
         LiteralArgument("test"),
-        LiteralArgument(baseRequest.model),
+        ModelArgument(AbsoluteTarget(modelPath)),
         StringOption({ flag: "--out-itf", value: "trace_{seq}.itf.json" }),
         SeedOption(List("0")),
         MatchOption(List(94, 65, 36)),

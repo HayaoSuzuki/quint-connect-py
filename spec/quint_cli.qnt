@@ -22,9 +22,23 @@ module quint_cli {
 
   type QuintConfig = Simulation(SimulationOptions) | NamedTestMode(NamedTestOptions)
 
+  // The adapter classifies paths using the host platform's path syntax.
+  type InputPath = AbsolutePath(str) | RelativePath(str)
+  type ExecutableInput = ExecutablePath(InputPath) | BareCommand(str)
+
+  type ResolvedPath =
+    | AbsoluteTarget(str)
+    | AnchoredPath({ directory: str, path: str })
+
+  type LaunchExecutable =
+    | DirectExecutable(ResolvedPath)
+    // Resolve the name before launch. Relative and empty PATH entries use directory.
+    | SearchCallerPath({ directory: str, name: str })
+
   type CliRequest = {
-    executable: str,
-    model: str,
+    callerDirectory: str, // Absolute cwd captured at the call site.
+    executable: ExecutableInput,
+    model: InputPath,
     workspace: int,
     main: CliOption[str],
     backend: CliOption[CliBackend],
@@ -35,13 +49,14 @@ module quint_cli {
   // Each variant represents one OS argument. Options use flag=value.
   type CliArgument =
     | LiteralArgument(str)
+    | ModelArgument(ResolvedPath)
     | StringOption({ flag: str, value: str })
     | IntegerOption({ flag: str, value: int })
     | SeedOption(SeedDigits) // --seed= followed by the joined ASCII digits
     | MatchOption(List[int]) // --match= followed by the encoded pattern
 
   type QuintCommand = {
-    executable: str,
+    executable: LaunchExecutable,
     workspace: int,
     seed: SeedDigits,
     argv: List[CliArgument],
@@ -123,12 +138,23 @@ module quint_cli {
   // {seq} works for both commands. Exact selection allows test to use the same template.
   pure val outputTemplate: str = "trace_{seq}.itf.json"
 
-  // Launch in the reserved workspace so Quint only expands placeholders in the basename.
-  // The adapter resolves caller-relative model and executable paths before changing cwd.
+  // Keep the original path for the OS to interpret, including symlinks and "..".
+  pure def resolvePath(directory: str, path: InputPath): ResolvedPath =
+    match path {
+      | AbsolutePath(value) => AbsoluteTarget(value)
+      | RelativePath(value) => AnchoredPath({ directory: directory, path: value })
+    }
+
+  // The reserved workspace is the child cwd. The template only contains a basename.
   pure def quintCommand(request: CliRequest, osSeed: SeedDigits): CommandResult = {
     val seed = optionOr(request.seed, osSeed)
     if (not(validSeed(seed))) InvalidSeed
     else {
+      val model = ModelArgument(resolvePath(request.callerDirectory, request.model))
+      val executable = match request.executable {
+        | ExecutablePath(path) => DirectExecutable(resolvePath(request.callerDirectory, path))
+        | BareCommand(name) => SearchCallerPath({ directory: request.callerDirectory, name: name })
+      }
       val common = List(
         StringOption({ flag: "--out-itf", value: outputTemplate }),
         SeedOption(seed),
@@ -145,10 +171,10 @@ module quint_cli {
           else if (maxSamples < nTraces or maxSamples > maxCliInteger) InvalidSampleLimit
           else if (not(validOptionalLimit(options.maxSteps, 0))) InvalidStepLimit
           else CommandReady({
-            executable: request.executable,
+            executable: executable,
             workspace: request.workspace,
             seed: seed,
-            argv: List(LiteralArgument("run"), LiteralArgument(request.model), LiteralArgument("--mbt"))
+            argv: List(LiteralArgument("run"), model, LiteralArgument("--mbt"))
               .concat(common)
               .append(IntegerOption({ flag: "--n-traces", value: nTraces }))
               .append(IntegerOption({ flag: "--max-samples", value: maxSamples }))
@@ -162,10 +188,10 @@ module quint_cli {
         | NamedTestMode(options) =>
           if (not(validOptionalLimit(options.maxSamples, 1))) InvalidSampleLimit
           else CommandReady({
-            executable: request.executable,
+            executable: executable,
             workspace: request.workspace,
             seed: seed,
-            argv: List(LiteralArgument("test"), LiteralArgument(request.model))
+            argv: List(LiteralArgument("test"), model)
               .concat(common)
               .append(MatchOption(exactTestPattern(options.name)))
               .concat(optionArgument(options.maxSamples, value =>

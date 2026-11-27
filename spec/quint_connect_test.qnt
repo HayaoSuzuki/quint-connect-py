@@ -250,8 +250,9 @@ module quint_connect_test {
 
 
   pure val sampleRequest: cli::CliRequest = {
-    executable: "/bin/quint",
-    model: "/models/counter.qnt",
+    callerDirectory: "/models",
+    executable: cli::ExecutablePath(cli::AbsolutePath("/bin/quint")),
+    model: cli::RelativePath("counter.qnt"),
     workspace: 1,
     main: cli::CliDefault,
     backend: cli::CliDefault,
@@ -260,6 +261,29 @@ module quint_connect_test {
       init: cli::CliDefault, step: cli::CliDefault, nTraces: cli::CliSpecified(2),
       maxSamples: cli::CliDefault, maxSteps: cli::CliDefault,
     }),
+  }
+
+  run callerRelativePathsSurviveIsolatedWorkspaceReservationTest = {
+    val request = {
+      ...sampleRequest,
+      callerDirectory: "/checkout",
+      executable: cli::ExecutablePath(cli::RelativePath("tools/quint")),
+      model: cli::RelativePath("spec/counter.qnt"),
+    }
+    init
+      .then(startRequestedRun(1, request, sampleSeed, defaultArtifactRoot, itemsSelection))
+      .expect(filesystem.workspaces.get(1).owner == 1 and hasEvent(calls.get(1).history, event =>
+        match event {
+          | CommandPrepared(plan) =>
+            plan.command.workspace == 1 and
+            plan.command.executable == cli::DirectExecutable(cli::AnchoredPath({
+              directory: "/checkout", path: "tools/quint",
+            })) and
+            plan.command.argv.nth(1) == cli::ModelArgument(cli::AnchoredPath({
+              directory: "/checkout", path: "spec/counter.qnt",
+            }))
+          | _ => false
+        }) and safety)
   }
 
   pure val reverseDirectoryListing: List[ProducedFile] = List(

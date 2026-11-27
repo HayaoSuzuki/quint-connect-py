@@ -1400,7 +1400,10 @@ module quint_connect {
     CALL_IDS.filter(id => not(hasFinished(calls.get(id).phase)))
 
   pure def simulatorRequest(workspace: WorkspaceId, config: cli::QuintConfig): cli::CliRequest = {
-    executable: "/bin/quint", model: "/models/sample.qnt", workspace: workspace,
+    callerDirectory: "/models",
+    executable: cli::ExecutablePath(cli::AbsolutePath("/bin/quint")),
+    model: cli::RelativePath("sample.qnt"),
+    workspace: workspace,
     main: cli::CliDefault, backend: cli::CliDefault, seed: cli::CliSpecified(sampleSeed), config: config,
   }
 
