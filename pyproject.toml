@@ -24,6 +24,7 @@ Issues = "https://github.com/HayaoSuzuki/quint-connect-py/issues"
 [dependency-groups]
 test = ["pytest>=9", "pytest-xdist", "hypothesis"]
 lint = ["ruff", "ty"]
+release = ["pydantic>=2,<3", "pypi-attestations==0.0.31", "twine==6.2.0"]
 
 [tool.uv]
 # Editable wheels also depend on native sources and the public Python types.
@@ -64,6 +65,7 @@ unfixable = ["F401"]
 # The fixture CLI runs the requested local adapter and prints verification results.
 "tools/export_quint_fixtures.py" = ["INP001", "S603", "S607", "T201"]
 "tools/check_wheel.py" = ["INP001"]
+"tools/verify_release.py" = ["INP001"]
 "**/*.pyi" = ["D"]
 
 [tool.ruff.lint.pydocstyle]

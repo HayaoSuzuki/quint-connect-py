@@ -34,7 +34,7 @@ jobs:
       - name: Check workflow syntax and shell scripts
         run: |
           uvx --python 3.14 --from actionlint-py==1.7.12.25 --with shellcheck-py==0.11.0.1 actionlint
-          uvx --python 3.14 --from shellcheck-py==0.11.0.1 shellcheck .github/scripts/install-quint.sh
+          uvx --python 3.14 --from shellcheck-py==0.11.0.1 shellcheck .github/scripts/*.sh
       - name: Audit workflows
         run: uvx --python 3.14 --from zizmor==1.32.0 zizmor --offline --persona auditor .github/workflows
 
@@ -57,7 +57,7 @@ jobs:
           version: '0.13.10'
           enable-cache: false
       - name: Install lint and test dependencies
-        run: uv sync --locked --group lint --group test --no-install-project
+        run: uv sync --locked --group lint --group test --group release --no-install-project
       - run: uv run --locked --no-sync ruff format --check
       - run: uv run --locked --no-sync ruff check --no-fix
       - run: uv run --locked --no-sync ty check
