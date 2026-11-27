@@ -1,3 +1,5 @@
+#[cfg(feature = "python")]
+use std::cell::OnceCell;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -14,7 +16,7 @@ pub trait Driver {
         Ok((&expected != actual).then_some(expected))
     }
 
-    /// Consumes the driver after replay, before another trace can start.
+    /// Consumes the driver before advancing and may attach a language-specific error.
     fn finish(
         self,
         _trace: &TraceFile,
@@ -78,7 +80,12 @@ pub enum TraceProblem<E> {
         site: DriverFailureSite,
         cause: Box<E>,
     },
-    Mismatch(Mismatch),
+    Mismatch {
+        detail: Box<Mismatch>,
+        // Carry the error shown during exit through final reporting.
+        #[cfg(feature = "python")]
+        presented: OnceCell<E>,
+    },
 }
 
 impl<E> TraceProblem<E> {
@@ -262,12 +269,16 @@ fn replay_steps<E: ReplayEnvironment>(
             .compare(expected, &actual)
             .map_err(|cause| TraceProblem::driver(DriverFailureSite::Compare(index), cause))?
         {
-            return Err(TraceProblem::Mismatch(Mismatch {
-                step_index: index,
-                action: step.action,
-                expected,
-                actual,
-            }));
+            return Err(TraceProblem::Mismatch {
+                detail: Box::new(Mismatch {
+                    step_index: index,
+                    action: step.action,
+                    expected,
+                    actual,
+                }),
+                #[cfg(feature = "python")]
+                presented: OnceCell::new(),
+            });
         }
     }
     Ok(())

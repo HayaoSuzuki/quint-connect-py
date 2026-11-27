@@ -611,7 +611,9 @@ impl GeneratedRun {
                 let saved = self.save_result(trace, &result.artifact.unwrap());
                 let artifacts = tagged("FromGeneration", json!({"seed": seed, "save": saved}));
                 match failure.problem {
-                    TraceProblem::Mismatch(mismatch) => {
+                    TraceProblem::Mismatch {
+                        detail: mismatch, ..
+                    } => {
                         let detail = mismatch_json(self.fixture_trace(trace), &mismatch);
                         tagged(
                             "StatesDiffer",

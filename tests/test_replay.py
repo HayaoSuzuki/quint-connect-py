@@ -4,6 +4,7 @@ import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from types import TracebackType
 from typing import override
 
 import pytest
@@ -307,6 +308,49 @@ def test_context_exit_cannot_suppress_a_mismatch(tmp_path: Path) -> None:
         replay(path, driver_context=driver_context, state_path=("state",))
 
     assert caught.value.actual is False
+
+
+def test_context_preserves_notes_on_the_mismatch(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+    received: list[StateMismatchError] = []
+
+    @contextmanager
+    def driver_context() -> Generator[ConstantDriver]:
+        try:
+            yield ConstantDriver(False)
+        except StateMismatchError as error:
+            received.append(error)
+            error.add_note("harness diagnostics")
+            raise
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, driver_context=driver_context, state_path=("state",))
+
+    assert caught.value is received[0]
+    assert caught.match("harness diagnostics")
+
+
+def test_exit_reraising_the_mismatch_is_not_a_cleanup_failure(tmp_path: Path) -> None:
+    path = write_trace(tmp_path / "trace.itf.json", [state(True)])
+
+    class ReraisingContext:
+        def __enter__(self) -> ConstantDriver:
+            return ConstantDriver(False)
+
+        def __exit__(
+            self,
+            _exc_type: type[BaseException] | None,
+            error: BaseException | None,
+            _traceback: TracebackType | None,
+            /,
+        ) -> None:
+            assert isinstance(error, StateMismatchError)
+            raise error
+
+    with pytest.raises(StateMismatchError) as caught:
+        replay(path, driver_context=ReraisingContext, state_path=("state",))
+
+    assert caught.value.driver_cleanup_error is None
 
 
 def test_context_exit_failure_preserves_the_mismatch(tmp_path: Path) -> None:

@@ -225,10 +225,20 @@ def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
         def observe(self) -> int:
             return 0
 
+    received: list[StateMismatchError] = []
+
+    @contextmanager
+    def driver_context() -> Generator[BrokenCounter]:
+        try:
+            yield BrokenCounter()
+        except StateMismatchError as error:
+            received.append(error)
+            raise
+
     with pytest.raises(StateMismatchError) as generated:
         run(
             config,
-            BrokenCounter,
+            driver_context=driver_context,
             quint=quint_executable(),
             seed=42,
             artifact_dir=artifact_dir,
@@ -236,6 +246,7 @@ def test_generated_mismatch_can_be_replayed(tmp_path: Path) -> None:
             state_path=("count",),
         )
 
+    assert generated.value is received[0]
     artifact = generated.value.artifact_path
     assert generated.value.artifact_error is None
     assert artifact is not None

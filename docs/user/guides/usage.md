@@ -49,10 +49,13 @@ replay(["first.itf.json", "second.itf.json"], driver_context=driver_context)
 Each context is entered after its trace is validated and exited before the
 next trace starts. Supply either the driver factory or `driver_context`.
 On failure, the context receives the original driver exception or a
-`StateMismatchError`. A context manager's return value cannot suppress the
-replay failure. A failure during exit produces `DriverError` with
-`DriverStage.EXIT` if the trace passed. If replay failed first, the exit
-exception is available as `driver_cleanup_error` on the original error.
+`StateMismatchError`. Quint Connect raises that same `StateMismatchError`
+instance to the caller, including any notes added during exit. Diagnostics
+that depend on artifact storage or cleanup are attached after exit.
+A context manager's return value cannot suppress the replay failure.
+A failure during exit produces `DriverError` with `DriverStage.EXIT` if the
+trace passed. If exit raises a separate exception after replay failed, that
+exception is available as `driver_cleanup_error` on the replay error.
 
 ## Configure state comparison
 

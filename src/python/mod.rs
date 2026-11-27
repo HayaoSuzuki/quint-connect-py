@@ -83,23 +83,27 @@ impl Driver for PythonDriver {
     fn finish(self, trace: &TraceFile, problem: Option<&TraceProblem<PyErr>>) -> PyResult<()> {
         Python::attach(|py| {
             let exit = self.exit.bind(py);
-            match problem {
-                None => exit.call1((py.None(), py.None(), py.None()))?,
-                Some(problem) => {
-                    let exception = match problem {
-                        TraceProblem::Driver { cause, .. } => cause.clone_ref(py),
-                        TraceProblem::Mismatch(mismatch) => {
-                            error::mismatch_exception(py, &self.types, trace, mismatch)
-                                .unwrap_or_else(|error| error)
-                        }
-                    };
-                    exit.call1((
-                        exception.get_type(py),
-                        exception.value(py),
-                        exception.traceback(py),
-                    ))?
-                }
+            let Some(problem) = problem else {
+                exit.call1((py.None(), py.None(), py.None()))?;
+                return Ok(());
             };
+            let exception = match problem {
+                TraceProblem::Driver { cause, .. } => cause.clone_ref(py),
+                TraceProblem::Mismatch { detail, presented } => presented
+                    .get_or_init(|| {
+                        error::mismatch_exception(py, &self.types, trace, detail)
+                            .unwrap_or_else(|error| error)
+                    })
+                    .clone_ref(py),
+            };
+            if let Err(cleanup) = exit.call1((
+                exception.get_type(py),
+                exception.value(py),
+                exception.traceback(py),
+            )) && !cleanup.value(py).is(exception.value(py))
+            {
+                return Err(cleanup);
+            }
             Ok(())
         })
     }
@@ -144,7 +148,7 @@ impl ReplayOptions {
     fn prepare(
         self,
         context_factory: Py<PyAny>,
-        types: &Arc<Types>,
+        types: Arc<Types>,
     ) -> (
         Selection,
         LocalEnvironment<impl FnMut() -> PyResult<PythonDriver> + Send + use<>>,
@@ -155,12 +159,8 @@ impl ReplayOptions {
         };
         let reporter = self
             .log_replay
-            .then(|| diagnostics::reporter(Arc::clone(types), self.log_steps));
-        let factory = factory(
-            context_factory,
-            Arc::clone(types),
-            self.comparison.unwrap_or_default(),
-        );
+            .then(|| diagnostics::reporter(Arc::clone(&types), self.log_steps));
+        let factory = factory(context_factory, types, self.comparison.unwrap_or_default());
         (selection, LocalEnvironment::new(factory, reporter))
     }
 }
@@ -177,11 +177,11 @@ fn replay(
     options: ReplayOptions,
 ) -> PyResult<()> {
     let types = Arc::new(Types::load(py)?);
-    let (selection, mut environment) = options.prepare(context_factory, &types);
+    let (selection, mut environment) = options.prepare(context_factory, types);
     let caller = std::env::current_dir()?;
     let files = saved_files(&paths, &caller);
     let result = py.detach(move || replay_files(&files, &selection, &mut environment));
-    result.map_err(|failure| error::from_replay(py, &types, failure))
+    result.map_err(|failure| error::from_replay(py, failure))
 }
 
 #[derive(FromPyObject)]
@@ -282,9 +282,9 @@ fn run(
 ) -> PyResult<()> {
     let request = Request::try_from(request)?;
     let types = Arc::new(Types::load(py)?);
-    let (selection, mut environment) = options.prepare(context_factory, &types);
+    let (selection, mut environment) = options.prepare(context_factory, types);
     let result = py.detach(move || run_model(&request, &selection, &mut environment));
-    result.map_err(|failure| error::from_run(py, &types, *failure))
+    result.map_err(|failure| error::from_run(py, *failure))
 }
 
 #[pymodule(name = "_native")]

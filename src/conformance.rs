@@ -377,7 +377,9 @@ fn outcome(result: Result<(), ReplayError<String>>) -> Json {
                     "DriverFailed",
                     json!({"location": saved_location(&failure.trace, site.step_index()), "stage": driver_stage(site), "cause": *cause}),
                 ),
-                TraceProblem::Mismatch(mismatch) => tagged(
+                TraceProblem::Mismatch {
+                    detail: mismatch, ..
+                } => tagged(
                     "StatesDiffer",
                     json!({
                         "detail": mismatch_json(FixtureTrace::Saved(&failure.trace), &mismatch),
