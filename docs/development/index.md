@@ -10,7 +10,7 @@
 hoimin と同じく Ruff は `ALL`、ty は全診断をエラーにする。Clippy は `all` と `pedantic` に加えて `nursery` を有効にする。検証にはリポジトリに記録したロックファイルを使う。
 
 ```sh
-uv sync --locked --python 3.14 --group test --group lint
+uv sync --locked --python 3.14 --group test --group lint --group release
 uv run --locked --group lint ruff check
 uv run --locked --group lint ruff format --check
 uv run --locked --group lint ty check
@@ -34,4 +34,15 @@ uv build --python 3.14
 python3 tools/check_wheel.py dist/quint_connect_py-*-cp314-abi3-*.whl
 ```
 
-PyPI リリースでは、hoimin と同様に、プラットフォームごとの配布物を先にビルドして検証し、検証済みの同じファイルを TestPyPI と PyPI へ順に公開する。公開用の GitHub Actions 環境と Trusted Publishing はリリース時に設定する。
+[リリースワークフロー](../../.github/workflows/release.yml)は Linux x86-64、macOS ARM64、Windows x86-64 の wheel と sdist をビルドする。wheel は両方の Python で、sdist はそこからビルドした wheel で、オフライン再生を確認する。公開対象のファイル名・バージョンと、PyPI が表示するメタデータも検査する。
+
+初回は PyPI と TestPyPI のアカウントに `quint-connect-py` の Pending Trusted Publisher を登録する。所有者は `HayaoSuzuki`、リポジトリは `quint-connect-py`、ワークフローファイルは `release.yml` とする。Environment には公開先に応じて `pypi` または `testpypi` を指定し、GitHub 側で両 Environment を `main` に制限する。
+
+```sh
+gh workflow run release.yml --ref main
+gh workflow run release.yml --ref main -f publish_version=0.1.0
+```
+
+バージョンを指定した実行では、同じコミットの CI 成功を確認してから、検証済みの各ファイルに SLSA ビルド来歴を付ける。TestPyPI に Trusted Publishing でアップロードし、取得し直したファイルが同一であり、ビルド来歴と公開アテステーションが有効であることを確認する。この検証が通過してから、同じファイルを PyPI へ公開し、同じ検証を行う。バージョンを空にした手動実行と PR では、ビルドからメタデータ検査までを実行する。
+
+公開後の検証や後続ジョブで失敗した場合は、同じ実行の失敗したジョブを再実行する。アップロードが途中で失敗した場合は、先にインデックスで受理されたファイルを確認する。

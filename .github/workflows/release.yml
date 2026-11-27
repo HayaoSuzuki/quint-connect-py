@@ -1,0 +1,300 @@
+name: Release distributions
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/scripts/**'
+      - 'Cargo.*'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'LICENSE'
+      - 'README.md'
+      - 'python/**'
+      - 'src/**'
+      - 'tools/check_wheel.py'
+      - 'tools/verify_release.py'
+  workflow_dispatch:
+    inputs:
+      publish_version:
+        description: 'Version to publish to TestPyPI and PyPI. Leave empty for a build preview.'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUSTUP_TOOLCHAIN: '1.100.0'
+  MATURIN_VERSION: '1.15.0'
+
+jobs:
+  version:
+    name: Check release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate manifests and publishing ref
+        id: version
+        env:
+          PUBLISH_VERSION: ${{ inputs.publish_version }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: bash .github/scripts/check-release-version.sh
+    permissions:
+      contents: read
+      actions: read # Check CI for the exact release commit.
+
+  wheel:
+    name: Build and test wheel (${{ matrix.platform }})
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: macos-arm64
+            runner: macos-26
+          - platform: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: |
+            3.15
+            3.14
+          allow-prereleases: true
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.10'
+          enable-cache: false
+      - name: Build manylinux wheel
+        if: runner.os == 'Linux'
+        env:
+          MATURIN_IMAGE: ghcr.io/pyo3/maturin:v1.15.0@sha256:1c897d72a79c083cdea8829662f7b28e7657cf5b0d7f44fb4231e55998cf52ed
+        shell: bash
+        run: bash .github/scripts/build-manylinux-wheel.sh
+      - name: Build native wheel
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          uvx --from "maturin==$MATURIN_VERSION" maturin build --release --locked \
+            --compatibility pypi --interpreter python --out dist
+      - name: Install and replay offline on both Python versions
+        shell: bash
+        run: |
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" = 1
+          python tools/check_wheel.py "${wheels[0]}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Build and test source distribution
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: |
+            3.15
+            3.14
+          allow-prereleases: true
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.10'
+          enable-cache: false
+      - name: Build sdist and smoke-test a wheel made from it
+        shell: bash
+        run: bash .github/scripts/build-sdist.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  validate:
+    name: Validate package metadata and inventory
+    needs: [version, wheel, sdist]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.10'
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - run: uv sync --locked --python 3.14 --only-group release --no-install-project
+      - run: uv run --locked --no-sync twine check --strict dist/*
+      - name: Check distribution names and version
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: uv run --locked --no-sync python tools/verify_release.py files "$RELEASE_VERSION" dist
+
+  attest:
+    name: Attest ${{ matrix.part }}
+    needs: [version, validate]
+    if: ${{ needs.version.outputs.publish == 'true' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.repository == 'HayaoSuzuki/quint-connect-py' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [linux-x86_64, macos-arm64, windows-x86_64, sdist]
+    permissions:
+      contents: read
+      id-token: write # Sign the build using the workflow identity.
+      attestations: write # Store the build provenance on GitHub.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.10'
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dist-${{ matrix.part }}
+          path: dist
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        id: build
+        with:
+          subject-path: 'dist/*'
+      - run: uv sync --locked --python 3.14 --only-group release --no-install-project
+      - name: Verify build provenance and convert it to PEP 740
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.build.outputs.bundle-path }}
+        shell: bash
+        run: bash .github/scripts/stage-release-attestation.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-${{ matrix.part }}
+          path: dist/*
+          if-no-files-found: error
+
+  testpypi:
+    name: Publish on TestPyPI
+    needs: attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/quint-connect-py
+    permissions:
+      id-token: write # Exchange the workflow identity for a PyPI upload token.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: signed-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+          attestations: true
+          print-hash: true
+
+  verify-testpypi:
+    name: Verify files and attestations on TestPyPI
+    needs: [version, testpypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.10'
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: signed-*
+          merge-multiple: true
+          path: dist
+      - run: uv sync --locked --python 3.14 --only-group release --no-install-project
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: uv run --locked --no-sync python tools/verify_release.py testpypi "$RELEASE_VERSION" dist
+
+  pypi:
+    name: Publish on PyPI
+    needs: verify-testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/quint-connect-py
+    permissions:
+      id-token: write # Exchange the workflow identity for a PyPI upload token.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: signed-*
+          merge-multiple: true
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: dist/
+          attestations: true
+          print-hash: true
+
+  verify-pypi:
+    name: Verify files and attestations on PyPI
+    needs: [version, pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: '0.13.10'
+          enable-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: signed-*
+          merge-multiple: true
+          path: dist
+      - run: uv sync --locked --python 3.14 --only-group release --no-install-project
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: uv run --locked --no-sync python tools/verify_release.py pypi "$RELEASE_VERSION" dist
