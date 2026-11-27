@@ -15,7 +15,7 @@ module quint_saved_replay_test {
   run missingFileReportsItsPathAndStopsBeforeDriverTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("missing.itf.json"), fs::SavedFile("good.itf.json")), itemsSelection))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .expect(finishedAs(failed(TraceFailed({
         location: AtSavedTrace({ path: fs::SavedFile("missing.itf.json"), position: firstPosition }),
         cause: "file not found",
@@ -27,7 +27,7 @@ module quint_saved_replay_test {
   run readFailurePreservesPathAndCauseTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("good.itf.json")), itemsSelection))
-      .then(readSavedPath(1, SavedReadFailed("permission denied")))
+      .then(readSavedPath(1, ReadFailed("permission denied")))
       .expect(finishedAs(failed(TraceFailed({
         location: AtSavedTrace({ path: fs::SavedFile("good.itf.json"), position: firstPosition }),
         cause: "permission denied",
@@ -36,13 +36,13 @@ module quint_saved_replay_test {
   run malformedSecondFileIsOpenedAfterFirstDriverCompletesTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("good.itf.json"), fs::SavedFile("bad.itf.json"), fs::SavedFile("empty.itf.json")), itemsSelection))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .expect(pathWasOpened(fs::SavedFile("good.itf.json"), firstPosition) and
         not(pathWasOpened(fs::SavedFile("bad.itf.json"), secondPosition)))
       .then(createDriver(1, FactorySucceeded(1)))
       .then(applyOperation(1, OperationApplied))
       .then(observeState(1, Observed(itemSet)))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .expect(finishedAs(failed(TraceFailed({
         location: AtSavedTrace({ path: fs::SavedFile("bad.itf.json"), position: secondPosition }),
         cause: "invalid JSON",
@@ -54,11 +54,11 @@ module quint_saved_replay_test {
   run repeatedPathIsReadAndGetsFreshDriverEachTimeTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("good.itf.json"), fs::SavedFile("good.itf.json")), itemsSelection))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .then(createDriver(1, FactorySucceeded(1)))
       .then(applyOperation(1, OperationApplied))
       .then(observeState(1, Observed(itemSet)))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .then(createDriver(1, FactorySucceeded(2)))
       .then(applyOperation(1, OperationApplied))
       .then(observeState(1, Observed(itemSet)))
@@ -68,7 +68,7 @@ module quint_saved_replay_test {
   run savedPathIsRetainedInMismatchAndNextFileIsNotOpenedTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("good.itf.json"), fs::SavedFile("missing.itf.json")), itemsSelection))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .then(createDriver(1, FactorySucceeded(1)))
       .then(applyOperation(1, OperationApplied))
       .then(observeState(1, Observed(integerDigit(1))))
@@ -90,7 +90,7 @@ module quint_saved_replay_test {
   run emptySavedFileAndEmptyPathListHaveDifferentDiagnosticsTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("empty.itf.json")), itemsSelection))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .then(startReplayPaths(2, List(), itemsSelection))
       .expect(finishedAs(failed(EmptyTrace(NoSavedTraceStates({
         path: fs::SavedFile("empty.itf.json"), position: firstPosition,
@@ -99,7 +99,7 @@ module quint_saved_replay_test {
   run invalidStepDiagnosticIdentifiesTheSavedFileAndStepTest =
     init
       .then(startReplayPaths(1, List(fs::SavedFile("named.itf.json")), itemsSelection))
-      .then(readSavedPath(1, SavedReadSucceeded))
+      .then(readSavedPath(1, ReadSucceeded))
       .expect(finishedAs(failed(TraceFailed({
         location: AtSavedStep({ path: fs::SavedFile("named.itf.json"), position: { trace: firstPosition, stepIndex: 0 } }),
         cause: "invalid operation",

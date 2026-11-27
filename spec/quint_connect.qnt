@@ -80,17 +80,20 @@ module quint_connect {
   }
 
   // Internal generation result, with filenames ordered by completeProcessSuccess.
-  type GenerationResult = ProcessFailed(str) | ProcessSucceeded(List[TraceId])
+  type GenerationResult = ProcessFailed(str) | OutputUnavailable(str) | ProcessSucceeded(List[TraceId])
+
+  type ListingResult = ListingSucceeded | ListingFailed(str)
 
   type SavedTracePosition = { path: fs::FilePath, position: TracePosition }
 
   type Location =
     | AtTrace(TracePosition)
     | AtStep(StepPosition)
+    | AtGeneratedTrace({ path: fs::FilePath, position: TracePosition })
     | AtSavedTrace(SavedTracePosition)
     | AtSavedStep({ path: fs::FilePath, position: StepPosition })
 
-  type SavedReadResult = SavedReadSucceeded | SavedReadFailed(str)
+  type ReadResult = ReadSucceeded | ReadFailed(str)
 
   type TraceError = {
     location: Location,
@@ -176,6 +179,7 @@ module quint_connect {
     | InvalidRequest(RequestProblem)
     | WorkspaceFailed({ seed: Seed, stage: WorkspaceStage, cause: str })
     | QuintFailed({ seed: Seed, cause: str })
+    | OutputListingFailed({ seed: Seed, workspace: WorkspaceId, cause: str })
     | EmptyTrace(EmptyInput)
     | IncompleteGeneration({ seed: Seed, requested: int, produced: int })
     | TraceFailed(TraceError)
@@ -189,6 +193,7 @@ module quint_connect {
   type Phase =
     | Ready
     | AwaitingGeneration(Generation)
+    | AwaitingListing({ generation: Generation, entries: List[cli::GeneratedFile] })
     | AwaitingValidation(TraceBatch)
     | AwaitingDriver(ValidatedTrace)
     | AwaitingOperation(ActiveTrace)
@@ -202,8 +207,10 @@ module quint_connect {
     | ReplayRequested(List[TraceId])
     | ReplayFilesRequested(List[fs::FilePath])
     | SavedReadAttempted(SavedTracePosition)
+    | GeneratedReadAttempted({ path: fs::FilePath, position: TracePosition })
     | CommandPrepared({ request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand })
     | WorkspaceReserved(Generation)
+    | ProcessExitedSuccessfully(Generation)
     | GenerationCompleted({ generation: Generation, result: GenerationResult })
     | ValidationAttempted(TracePosition)
     | TraceValidated({ position: TracePosition, steps: List[TraceStep] })
@@ -288,6 +295,9 @@ module quint_connect {
     val source = GeneratedItf(g)
     match result {
       | ProcessFailed(cause) => stop(recorded, source, QuintFailed({ seed: g.seed, cause: cause }))
+      | OutputUnavailable(cause) => stop(recorded, source, OutputListingFailed({
+          seed: g.seed, workspace: g.workspace, cause: cause,
+        }))
       | ProcessSucceeded(traces) =>
         if (traces.length() == 0)
           stop(recorded, source, EmptyTrace(NoGeneratedItf))
@@ -571,6 +581,7 @@ module quint_connect {
           | AbortedFiles(_) => true
           | _ => false
         }
+      | OutputUnavailable(_) => false
       | ProcessSucceeded(paths) =>
         match output {
           | GeneratedFiles(written) =>
@@ -585,9 +596,14 @@ module quint_connect {
         all {
           generationFilesAgree(result, output),
           fs::canRecordTraceFiles(filesystem, g.workspace, output),
-          changeCallWithFiles(
-            id, onGeneration(calls.get(id), g, result), fs::recordTraceFiles(filesystem, g.workspace, output)
-          ),
+          {
+            val current = calls.get(id)
+            val exited = match result {
+              | ProcessSucceeded(_) => recordEvent(current, current.phase, ProcessExitedSuccessfully(g))
+              | _ => current
+            }
+            changeCallWithFiles(id, onGeneration(exited, g, result), fs::recordTraceFiles(filesystem, g.workspace, output))
+          },
         }
       | _ => inapplicable
     }
@@ -595,7 +611,7 @@ module quint_connect {
   action completeProcessFailure(id: CallId, cause: str, partialOutput: fs::TraceFiles): bool =
     completeGenerationWithFiles(id, ProcessFailed(cause), fs::AbortedFiles(partialOutput))
 
-  // One complete listing carries both each file's basename and its bytes.
+  // The child writes a basename and byte sequence for each output file.
   type ProducedFile = { name: List[str], trace: TraceId, bytes: fs::Bytes }
 
   pure def generatedNames(entries: List[ProducedFile]): List[cli::GeneratedFile] =
@@ -608,14 +624,32 @@ module quint_connect {
     entries.indices().map(i => entries.nth(i).name).size() == entries.length() and
       entries.indices().map(i => entries.nth(i).trace).size() == entries.length()
 
-  action completeProcessSuccess(id: CallId, entries: List[ProducedFile]): bool = all {
-    distinctProducedFiles(entries),
-    completeGenerationWithFiles(
-      id,
-      ProcessSucceeded(cli::orderedGeneratedTraces(generatedNames(entries))),
-      fs::GeneratedFiles(generatedBytes(entries))
-    ),
-  }
+  action completeProcessSuccess(id: CallId, entries: List[ProducedFile]): bool =
+    match calls.get(id).phase {
+      | AwaitingGeneration(g) => {
+        val output = fs::GeneratedFiles(generatedBytes(entries))
+        all {
+          distinctProducedFiles(entries),
+          fs::canRecordTraceFiles(filesystem, g.workspace, output),
+          changeCallWithFiles(id, recordEvent(calls.get(id),
+            AwaitingListing({ generation: g, entries: generatedNames(entries) }), ProcessExitedSuccessfully(g)),
+            fs::recordTraceFiles(filesystem, g.workspace, output)),
+        }
+      }
+      | _ => inapplicable
+    }
+
+  action listGeneratedOutput(id: CallId, result: ListingResult): bool =
+    match calls.get(id).phase {
+      | AwaitingListing(listing) => {
+        val outcome = match result {
+          | ListingSucceeded => ProcessSucceeded(cli::orderedGeneratedTraces(listing.entries))
+          | ListingFailed(cause) => OutputUnavailable(cause)
+        }
+        changeCall(id, onGeneration(calls.get(id), listing.generation, outcome))
+      }
+      | _ => inapplicable
+    }
 
   // Existing lifecycle scenarios give ordered trace IDs and omit byte contents.
   action completeGeneration(id: CallId, result: GenerationResult): bool =
@@ -623,6 +657,7 @@ module quint_connect {
       | ProcessFailed(cause) => completeProcessFailure(id, cause, Map())
       | ProcessSucceeded(paths) =>
         completeGenerationWithFiles(id, result, fs::GeneratedFiles(traceSet(paths).mapBy(_ => List())))
+      | OutputUnavailable(_) => inapplicable
     }
 
   def traceIsReadable(batch: TraceBatch): bool =
@@ -655,20 +690,17 @@ module quint_connect {
       | ByteInputUnlabeledText => InvalidItf({ location: InvalidFile, cause: "unlabeled JSON text in model input" })
     }
 
-  action validateBytes(id: CallId, bytes: fs::Bytes): bool =
-    validateTrace(id, validationForBytes(bytes, calls.get(id).selection))
-
-  pure def validateSavedFile(snapshot: fs::FileSystem, path: fs::FilePath, result: SavedReadResult, selection: itf::Selection): ValidationResult = {
+  pure def validateSavedFile(snapshot: fs::FileSystem, path: fs::FilePath, result: ReadResult, selection: itf::Selection): ValidationResult = {
     if (not(snapshot.files.keys().contains(path)))
       InvalidItf({ location: InvalidFile, cause: "file not found" })
     else
       match result {
-        | SavedReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
-        | SavedReadSucceeded => validationForBytes(snapshot.files.get(path), selection)
+        | ReadFailed(cause) => InvalidItf({ location: InvalidFile, cause: cause })
+        | ReadSucceeded => validationForBytes(snapshot.files.get(path), selection)
       }
   }
 
-  action readSavedPath(id: CallId, result: SavedReadResult): bool =
+  action readSavedPath(id: CallId, result: ReadResult): bool =
     match calls.get(id).phase {
       | AwaitingValidation(batch) =>
         match batch.source {
@@ -704,7 +736,7 @@ module quint_connect {
 
   action validateGeneratedDocument(id: CallId, bytes: fs::Bytes): bool = all {
     workingInputMatches(id, bytes),
-    validateBytes(id, bytes),
+    readGeneratedInput(id, ReadSucceeded),
   }
 
   def factoryResultAllowed(result: FactoryResult): bool =
@@ -740,6 +772,55 @@ module quint_connect {
       | _ => inapplicable
     }
 
+  action beginArtifactCopy(id: CallId): bool =
+    match calls.get(id).phase {
+      | AwaitingArtifact(ctx) => {
+        val workspace = ctx.generation.workspace
+        val trace = ctx.detail.position.trace.trace
+        all {
+          fs::canStageEvidence(filesystem, workspace, trace),
+          changeCallWithFiles(id, calls.get(id), fs::stageEvidence(filesystem, workspace, trace)),
+        }
+      }
+      | _ => inapplicable
+    }
+
+  action writeArtifactCopy(id: CallId, count: int): bool =
+    match calls.get(id).phase {
+      | AwaitingArtifact(ctx) => {
+        val workspace = ctx.generation.workspace
+        match filesystem.workspaces.get(workspace).evidence {
+          | StagedEvidence(staged) => all {
+              count > staged.bytes.length(),
+              fs::canWriteEvidence(filesystem, workspace, count),
+              changeCallWithFiles(id, calls.get(id), fs::writeEvidence(filesystem, workspace, count)),
+            }
+          | _ => inapplicable
+        }
+      }
+      | _ => inapplicable
+    }
+
+  action completeArtifactCopy(id: CallId, result: StorageResult): bool =
+    match calls.get(id).phase {
+      | AwaitingArtifact(ctx) => {
+        val workspace = ctx.generation.workspace
+        val updated = onArtifact(calls.get(id), ctx.generation, ctx.detail, result)
+        match result {
+          | StorageSucceeded => all {
+              fs::canPublishEvidence(filesystem, workspace),
+              changeCallWithFiles(id, updated, fs::publishEvidence(filesystem, workspace)),
+            }
+          | StorageFailed(_) => all {
+              fs::canAbandonEvidence(filesystem, workspace),
+              changeCallWithFiles(id, updated, fs::abandonEvidence(filesystem, workspace)),
+            }
+        }
+      }
+      | _ => inapplicable
+    }
+
+  // Lifecycle tests can collapse the same filesystem transitions into one action.
   pure def copyAgrees(result: StorageResult, copy: fs::CopyOutcome): bool =
     match copy {
       | CopyComplete => result == StorageSucceeded
@@ -830,6 +911,7 @@ module quint_connect {
         | GenerationCompleted(completed) =>
           match completed.result {
             | ProcessFailed(_) => List()
+            | OutputUnavailable(_) => List()
             | ProcessSucceeded(paths) =>
               if (hasEnoughTraces(completed.generation.expectation, paths.length())) paths else List()
           }
@@ -875,19 +957,18 @@ module quint_connect {
     )
 
   pure def validationFollowsInput(history: List[Event], index: int, position: TracePosition): bool =
-    if (hasPrior(history, index, event =>
+    previousIs(history, index, event =>
+      match event {
+        | SavedReadAttempted(file) => file.position == position
+        | GeneratedReadAttempted(file) => file.position == position
+        | _ => false
+      }
+    ) or (not(hasPrior(history, index, event =>
       match event {
         | ReplayFilesRequested(_) => true
         | _ => false
       }
-    ))
-      previousIs(history, index, event =>
-        match event {
-          | SavedReadAttempted(file) => file.position == position
-          | _ => false
-        }
-      )
-    else traceIsNext(history, index, position)
+    )) and traceIsNext(history, index, position))
 
   pure def driverOwnsStep(history: List[Event], index: int, ctx: DriverStep): bool =
     hasPrior(history, index, event => event == DriverCreated({ trace: ctx.position.trace, driver: ctx.driver }))
@@ -940,6 +1021,14 @@ module quint_connect {
     match history.nth(index) {
       | SavedReadAttempted(file) =>
         requestedSavedPath(history, index, file) and traceIsNext(history, index, file.position)
+      | GeneratedReadAttempted(file) =>
+        traceIsNext(history, index, file.position) and hasPrior(history, index, event =>
+          match event {
+            | GenerationCompleted(completed) =>
+              file.path == fs::workingPath(completed.generation.workspace, file.position.trace)
+            | _ => false
+          }
+        )
       | ValidationAttempted(position) => validationFollowsInput(history, index, position)
       | TraceValidated(validated) =>
         validated.steps.length() > 0 and
@@ -1233,8 +1322,16 @@ module quint_connect {
                 | _ => true
               }
             )
+          | ProcessExitedSuccessfully(g) =>
+            hasPrior(history, index, event => event == WorkspaceReserved(g))
           | GenerationCompleted(completed) =>
-            hasPrior(history, index, event => event == WorkspaceReserved(completed.generation))
+            hasPrior(history, index, event => event == WorkspaceReserved(completed.generation)) and
+              (match completed.result {
+                | ProcessFailed(_) => not(hasPrior(history, index, event =>
+                    event == ProcessExitedSuccessfully(completed.generation)))
+                | _ => previousIs(history, index, event =>
+                    event == ProcessExitedSuccessfully(completed.generation))
+              })
           | CleanupAttempted(cleaned) => ownsWorkspace(history, cleaned.workspace)
           | _ => true
         }
@@ -1261,9 +1358,23 @@ module quint_connect {
       )
     }
 
+  def stagedEvidenceMatchesCall(workspace: WorkspaceId): bool = {
+    val storage = filesystem.workspaces.get(workspace)
+    match storage.evidence {
+      | StagedEvidence(staged) =>
+        match calls.get(storage.owner).phase {
+          | AwaitingArtifact(ctx) =>
+            ctx.generation.workspace == workspace and ctx.detail.position.trace.trace == staged.trace
+          | _ => false
+        }
+      | _ => true
+    }
+  }
+
   val persistedEvidence: bool =
     filesystem.workspaces.keys().forall(workspace =>
-      evidenceFollowsSave(calls.get(filesystem.workspaces.get(workspace).owner).history, workspace)
+      stagedEvidenceMatchesCall(workspace) and
+        evidenceFollowsSave(calls.get(filesystem.workspaces.get(workspace).owner).history, workspace)
     )
 
   val safety: bool = and {
@@ -1305,15 +1416,25 @@ module quint_connect {
       | _ => inapplicable
     }
 
-  action readGeneratedInput(id: CallId): bool =
+  action readGeneratedInput(id: CallId, result: ReadResult): bool =
     match calls.get(id).phase {
       | AwaitingValidation(batch) =>
         match batch.source {
           | GeneratedItf(g) => {
-            val trace = tracePosition(batch).trace
-            if (fs::canReadGeneratedFile(filesystem, g.workspace, trace))
-              validateGeneratedDocument(id, filesystem.files.get(fs::workingPath(g.workspace, trace)))
-            else inapplicable
+            val position = tracePosition(batch)
+            val path = fs::workingPath(g.workspace, position.trace)
+            val current = calls.get(id)
+            val recorded = recordEvent(current, current.phase, GeneratedReadAttempted({ path: path, position: position }))
+            all {
+              fs::canReadGeneratedFile(filesystem, g.workspace, position.trace),
+              match result {
+                | ReadSucceeded => changeCall(id, onValidation(recorded, batch,
+                    validationForBytes(filesystem.files.get(path), current.selection)))
+                | ReadFailed(cause) => changeCall(id, stop(recorded, batch.source, TraceFailed({
+                    location: AtGeneratedTrace({ path: path, position: position }), cause: cause,
+                  })))
+              },
+            }
           }
           | _ => inapplicable
         }
@@ -1324,6 +1445,29 @@ module quint_connect {
     root: 2,
     nodes: List(qv::BooleanNode(true), qv::IntegerNode({ negative: false, digits: List(1) }), qv::SetNode(List(0, 1))),
   }
+
+  action startSampledEvidenceReplay(id: CallId, workspace: WorkspaceId, selection: itf::Selection): bool =
+    if (fs::workspaceAvailable(filesystem, workspace)) inapplicable
+    else {
+      val storage = filesystem.workspaces.get(workspace)
+      match storage.evidence {
+        | StagedEvidence(staged) =>
+          startReplayPaths(id, List(fs::evidencePath(storage.root, workspace, staged.trace)), selection)
+        | PublishedEvidence(trace) =>
+          startReplayPaths(id, List(fs::evidencePath(storage.root, workspace, trace)), selection)
+        | _ => inapplicable
+      }
+    }
+
+  action copySampledBytes(id: CallId): bool =
+    match calls.get(id).phase {
+      | AwaitingArtifact(ctx) => {
+        val path = fs::workingPath(ctx.generation.workspace, ctx.detail.position.trace.trace)
+        nondet count = Set(1, filesystem.files.get(path).length()).oneOf()
+        writeArtifactCopy(id, count)
+      }
+      | _ => inapplicable
+    }
 
   action step: bool = all {
     pendingCalls.size() > 0,
@@ -1342,8 +1486,9 @@ module quint_connect {
           { ...defaultSelection, statePath: List("items") }),
         startReplayPaths(id, List(fs::SavedFile("good.itf.json"), fs::SavedFile("missing.itf.json")),
           { ...defaultSelection, statePath: List("items") }),
-        readSavedPath(id, SavedReadSucceeded),
-        readSavedPath(id, SavedReadFailed("permission denied")),
+        startSampledEvidenceReplay(id, workspace, { ...defaultSelection, statePath: List("items") }),
+        readSavedPath(id, ReadSucceeded),
+        readSavedPath(id, ReadFailed("permission denied")),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(1)),
           sampleSeed, defaultArtifactRoot, { ...defaultSelection, statePath: List("items") }),
         startRequestedRun(id, simulatorRequest(workspace, simulationWithCount(2)),
@@ -1360,7 +1505,10 @@ module quint_connect {
             { name: cli::generatedFilename(List("2")), trace: 0, bytes: producedBytes })
         ),
         completeProcessFailure(id, "Quint failed", Map(0 -> List(123))),
-        readGeneratedInput(id),
+        listGeneratedOutput(id, ListingSucceeded),
+        listGeneratedOutput(id, ListingFailed("output listing failed")),
+        readGeneratedInput(id, ReadSucceeded),
+        readGeneratedInput(id, ReadFailed("output file unreadable")),
         validateSampledSavedTrace(id, ValidSteps(List(openingStep))),
         validateSampledSavedTrace(id, ValidSteps(List(openingStep, incrementStep))),
         validateSampledSavedTrace(id, EmptyStates),
@@ -1371,8 +1519,10 @@ module quint_connect {
         applyOperation(id, OperationFailed("operation failed")),
         observeState(id, Observed(observed)),
         observeState(id, ObservationFailed("observation failed")),
-        saveArtifact(id, StorageSucceeded),
-        saveArtifact(id, StorageFailed("artifact destination unavailable")),
+        beginArtifactCopy(id),
+        copySampledBytes(id),
+        completeArtifactCopy(id, StorageSucceeded),
+        completeArtifactCopy(id, StorageFailed("artifact destination unavailable")),
         cleanWorkspace(id, StorageSucceeded),
         cleanWorkspace(id, StorageFailed("temporary directory cleanup failed")),
       }
@@ -1485,6 +1635,32 @@ module quint_connect_sample {
     }
   )
 
+  observation listingFailureObserved = anyCallHas(event =>
+    match event {
+      | FailureRecognized(error) =>
+        match error {
+          | OutputListingFailed(_) => true
+          | _ => false
+        }
+      | _ => false
+    }
+  )
+
+  observation generatedReadFailed = anyCallHas(event =>
+    match event {
+      | FailureRecognized(error) =>
+        match error {
+          | TraceFailed(failure) =>
+            match failure.location {
+              | AtGeneratedTrace(_) => true
+              | _ => false
+            }
+          | _ => false
+        }
+      | _ => false
+    }
+  )
+
   observation generationCompleted = anyCallHas(event =>
     match event {
       | GenerationCompleted(_) => true
@@ -1526,6 +1702,22 @@ module quint_connect_sample {
       | _ => false
     }
   )
+
+  observation artifactCopyStaged =
+    filesystem.workspaces.keys().exists(workspace =>
+      match filesystem.workspaces.get(workspace).evidence {
+        | StagedEvidence(_) => true
+        | _ => false
+      }
+    )
+
+  observation artifactCopyWritten =
+    filesystem.workspaces.keys().exists(workspace =>
+      match filesystem.workspaces.get(workspace).evidence {
+        | StagedEvidence(staged) => staged.bytes.length() > 0
+        | _ => false
+      }
+    )
 
   observation artifactSaveAttempted = anyCallHas(event =>
     match event {

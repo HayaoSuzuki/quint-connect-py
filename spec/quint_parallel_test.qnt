@@ -17,7 +17,7 @@ module quint_parallel_test {
   action emitCallFile(id: CallId): bool =
     completeProcessSuccess(id, List({
       name: cli::generatedFilename(List("2")), trace: sharedTrace, bytes: parallelBytes.get(id),
-    }))
+    })).then(listGeneratedOutput(id, ListingSucceeded))
 
   action findMismatch(id: CallId): bool =
     validateGeneratedDocument(id, parallelBytes.get(id))

@@ -304,6 +304,7 @@ module quint_connect_test {
     init
       .then(startRequestedRun(1, sampleRequest, sampleSeed, "evidence", itemsSelection))
       .then(completeProcessSuccess(1, reverseDirectoryListing))
+      .then(listGeneratedOutput(1, ListingSucceeded))
       .then(validateGeneratedDocument(1, originalBytes))
       .then(createDriver(1, FactorySucceeded(1)))
       .then(applyOperation(1, OperationApplied))
@@ -317,7 +318,7 @@ module quint_connect_test {
       .expect(filesystem.files.keys() == Set(saved))
       .expect(filesystem.files.get(saved) == originalBytes)
       .then(startReplayPaths(2, List(saved), itemsSelection))
-      .then(readSavedPath(2, SavedReadSucceeded))
+      .then(readSavedPath(2, ReadSucceeded))
       .then(createDriver(2, FactorySucceeded(2)))
       .then(applyOperation(2, OperationApplied))
       .then(observeState(2, Observed(missingBoolean)))
@@ -328,6 +329,7 @@ module quint_connect_test {
     init
       .then(startRequestedRun(1, sampleRequest, sampleSeed, "evidence", itemsSelection))
       .then(completeProcessSuccess(1, reverseDirectoryListing))
+      .then(listGeneratedOutput(1, ListingSucceeded))
       .then(validateGeneratedDocument(1, otherBytes).fail())
 
   run seedRejectionDoesNotReserveOrExecuteTest =
@@ -357,6 +359,7 @@ module quint_connect_test {
         config: cli::NamedTestMode({ name: List(97), maxSamples: cli::CliDefault }),
       }, sampleSeed, "evidence", { actionPath: List("dispatch"), statePath: List("items") }))
       .then(completeProcessSuccess(2, List({ name: cli::generatedFilename(List("0")), trace: 0, bytes: namedBytes })))
+      .then(listGeneratedOutput(2, ListingSucceeded))
       .then(validateGeneratedDocument(2, namedBytes))
       .then(createDriver(2, FactorySucceeded(2)))
       .then(applyOperation(2, OperationApplied))
@@ -369,6 +372,7 @@ module quint_connect_test {
       .then(startRequestedRun(1, { ...sampleRequest, config: simulationWithCount(1) },
         sampleSeed, "evidence", itemsSelection))
       .then(completeProcessSuccess(1, List({ name: cli::generatedFilename(List("0")), trace: 0, bytes: List(123) })))
+      .then(listGeneratedOutput(1, ListingSucceeded))
       .then(validateGeneratedDocument(1, List(123)))
       .then(cleanWorkspace(1, StorageSucceeded))
       .expect(finishedAs(1, failed(TraceFailed({
