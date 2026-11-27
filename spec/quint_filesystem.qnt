@@ -189,18 +189,20 @@ module quint_filesystem {
 
   pure def canRecordWorkspaceContents(
     fs: FileSystem, workspace: int, owner: int, output: GenerationFiles, contents: WorkspaceContents
-  ): bool = {
-    val regular = contents.regular.keys()
-    val aliases = contents.aliases.keys()
-    val nonFiles = contents.nonFiles.keys()
-    and {
-      writtenFiles(output) == contents.regular,
-      canRecordTraceFiles(fs, workspace, output),
-      regular.intersect(aliases.union(nonFiles)).size() == 0,
-      aliases.intersect(nonFiles).size() == 0,
-      aliases.union(nonFiles).forall(trace => canCreateWorkingEntry(fs, workspace, owner, trace)),
+  ): bool =
+    if (not(canRecordTraceFiles(fs, workspace, output))) false
+    else {
+      val regular = contents.regular.keys()
+      val aliases = contents.aliases.keys()
+      val nonFiles = contents.nonFiles.keys()
+      and {
+        fs.workspaces.get(workspace).owner == owner,
+        writtenFiles(output) == contents.regular,
+        regular.intersect(aliases.union(nonFiles)).size() == 0,
+        aliases.intersect(nonFiles).size() == 0,
+        aliases.union(nonFiles).forall(trace => canCreateWorkingEntry(fs, workspace, owner, trace)),
+      }
     }
-  }
 
   pure def recordWorkspaceContents(
     fs: FileSystem, workspace: int, output: GenerationFiles, contents: WorkspaceContents

@@ -36,6 +36,17 @@ module quint_filesystem_test {
         .put(firstArtifact, bytesOfFirstCall)
         .put(secondArtifact, bytesOfSecondCall) and safety)
 
+  run onlyTheOwnerCanRecordRegularOrEmptyProcessOutputTest = {
+    val regular = regularWorkspaceContents(Map(trace -> bytesOfFirstCall))
+    val empty = regularWorkspaceContents(Map())
+    init
+      .then(reserve(1, 1, List("4", "2"), root))
+      .expect(canRecordWorkspaceContents(filesystem, 1, 1, GeneratedFiles(regular.regular), regular) and
+        not(canRecordWorkspaceContents(filesystem, 1, 2, GeneratedFiles(regular.regular), regular)) and
+        not(canRecordWorkspaceContents(filesystem, 1, 2, AbortedFiles(Map()), empty)) and
+        not(canRecordWorkspaceContents(filesystem, 2, 2, AbortedFiles(Map()), empty)) and safety)
+  }
+
   run partiallyWrittenEvidenceIsNeverPublishedTest =
     init
       .then(reserveAndGenerate(1, bytesOfFirstCall))
