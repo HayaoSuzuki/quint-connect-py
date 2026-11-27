@@ -5,6 +5,7 @@ module quint_connect {
   import quint_values as qv from "./quint_values"
   import quint_itf as itf from "./quint_itf"
   import quint_cli as cli from "./quint_cli"
+  import quint_path_search as path from "./quint_path_search"
   import quint_filesystem as fs from "./quint_filesystem"
 
   type CallId = int
@@ -179,10 +180,15 @@ module quint_connect {
     | RejectedSampleLimit
     | RejectedStepLimit
 
+  type PathEnvironment = { directories: List[cli::InputPath], observations: path::Candidate -> path::Observation }
+  type PathLookup = { callerDirectory: str, name: str, environment: PathEnvironment, result: path::SearchResult }
+  type ExecutionTarget = ExplicitExecutable(cli::ResolvedPath) | ExecutableOnPath(path::Candidate)
+
   type Failure =
     | InvalidRequest(RequestProblem)
     | WorkspaceFailed({ seed: Seed, stage: WorkspaceStage, cause: str })
     | QuintFailed({ seed: Seed, cause: str })
+    | ExecutableLookupFailed({ seed: Seed, problem: path::Resolution })
     | OutputListingFailed({ seed: Seed, workspace: WorkspaceId, cause: str })
     | EmptyTrace(EmptyInput)
     | IncompleteGeneration({ seed: Seed, requested: int, produced: int })
@@ -212,7 +218,10 @@ module quint_connect {
     | ReplayFilesRequested(List[fs::FilePath])
     | SavedReadAttempted(SavedTracePosition)
     | GeneratedReadAttempted(GeneratedTracePosition)
-    | CommandPrepared({ request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand })
+    | PathSearchCompleted(PathLookup)
+    | CommandPrepared({
+        request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand, target: ExecutionTarget,
+      })
     | WorkspaceReserved(Generation)
     | ProcessExitedSuccessfully(Generation)
     | GenerationCompleted({ generation: Generation, result: GenerationResult, basenames: TraceBasenames })
@@ -549,8 +558,20 @@ module quint_connect {
       | NamedTestMode(_) => selection.actionPath.length() > 0
     }
 
-  action startRequestedRun(
-    id: CallId, request: cli::CliRequest, drawnSeed: Seed, artifactRoot: str, selection: itf::Selection
+  action reservePlannedRun(
+    id: CallId, request: cli::CliRequest, drawnSeed: Seed, command: cli::QuintCommand,
+    artifactRoot: str, state: CallState, target: ExecutionTarget
+  ): bool =
+    reserveRun(id, {
+      expectation: commandExpectation(request.config), seed: command.seed,
+      workspace: command.workspace, artifactRoot: artifactRoot,
+    }, recordEvent(state, Ready, CommandPrepared({
+      request: request, drawnSeed: drawnSeed, command: command, target: target,
+    })))
+
+  action startRequestedRunWithPath(
+    id: CallId, request: cli::CliRequest, drawnSeed: Seed, artifactRoot: str, selection: itf::Selection,
+    environment: PathEnvironment
   ): bool =
     match cli::quintCommand(request, drawnSeed) {
       | InvalidSeed => rejectRunRequest(id, RejectedSeed)
@@ -559,15 +580,34 @@ module quint_connect {
       | InvalidStepLimit => rejectRunRequest(id, RejectedStepLimit)
       | CommandReady(command) =>
         if (hasActionSource(request.config, selection)) {
-          val requestState = { ...calls.get(id), selection: selection }
-          reserveRun(id, {
-            expectation: commandExpectation(request.config),
-            seed: command.seed,
-            workspace: command.workspace,
-            artifactRoot: artifactRoot,
-          }, recordEvent(requestState, Ready, CommandPrepared({ request: request, drawnSeed: drawnSeed, command: command })))
+          val state = { ...calls.get(id), selection: selection }
+          match command.executable {
+            | DirectExecutable(executable) => reservePlannedRun(
+                id, request, drawnSeed, command, artifactRoot, state, ExplicitExecutable(executable))
+            | SearchCallerPath(search) => {
+              val result = path::searchPath(search.directory, search.name, environment.directories, environment.observations)
+              val resolved = recordEvent(state, Ready, PathSearchCompleted({
+                callerDirectory: search.directory, name: search.name, environment: environment, result: result,
+              }))
+              match result.resolution {
+                | Found(candidate) => reservePlannedRun(
+                    id, request, drawnSeed, command, artifactRoot, resolved, ExecutableOnPath(candidate))
+                | _ => all {
+                    calls.get(id).phase == Ready,
+                    changeCall(id, stop(resolved, SavedItf, ExecutableLookupFailed({
+                      seed: command.seed, problem: result.resolution,
+                    }))),
+                  }
+              }
+            }
+          }
         } else rejectRunRequest(id, RejectedActionPath)
     }
+
+  action startRequestedRun(
+    id: CallId, request: cli::CliRequest, drawnSeed: Seed, artifactRoot: str, selection: itf::Selection
+  ): bool =
+    startRequestedRunWithPath(id, request, drawnSeed, artifactRoot, selection, { directories: List(), observations: Map() })
 
   action failReservation(id: CallId, seed: Seed, cause: str): bool = all {
     calls.get(id).phase == Ready,
@@ -1304,6 +1344,25 @@ module quint_connect {
       | _ => false
     }
 
+  pure def executableMatchesPlan(
+    history: List[Event], index: int, command: cli::QuintCommand, target: ExecutionTarget
+  ): bool =
+    match command.executable {
+      | DirectExecutable(executable) => target == ExplicitExecutable(executable)
+      | SearchCallerPath(search) =>
+        previousIs(history, index, event =>
+          match event {
+            | PathSearchCompleted(lookup) =>
+              search.directory == lookup.callerDirectory and search.name == lookup.name and
+                (match lookup.result.resolution {
+                  | Found(candidate) => target == ExecutableOnPath(candidate)
+                  | _ => false
+                })
+            | _ => false
+          }
+        )
+    }
+
   val isolatedResources: bool = and {
     WORKSPACE_IDS.forall(workspace => {
       val owners = CALL_IDS.filter(id => ownsWorkspace(calls.get(id).history, workspace))
@@ -1328,10 +1387,14 @@ module quint_connect {
                 | CommandPrepared(plan) =>
                   i < index and plan.command.workspace == g.workspace and plan.command.seed == g.seed and
                     cli::quintCommand(plan.request, plan.drawnSeed) == cli::CommandReady(plan.command) and
-                    commandExpectation(plan.request.config) == g.expectation
+                    commandExpectation(plan.request.config) == g.expectation and
+                    executableMatchesPlan(history, i, plan.command, plan.target)
                 | _ => true
               }
             )
+          | PathSearchCompleted(lookup) =>
+            lookup.result == path::searchPath(lookup.callerDirectory, lookup.name,
+              lookup.environment.directories, lookup.environment.observations)
           | ProcessExitedSuccessfully(g) =>
             hasPrior(history, index, event => event == WorkspaceReserved(g))
           | GenerationCompleted(completed) =>
