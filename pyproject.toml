@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "quint-connect-py"
-version = "0.1.0"
+version = "0.2.0"
 description = "Replay Quint model traces against Python code"
 readme = "README.md"
 requires-python = ">=3.14,<3.16"

@@ -2,16 +2,22 @@
 
 ## Install with uv
 
-Create a virtual environment with CPython 3.14 or 3.15 and install the package.
+In a uv project with a `requires-python` range within `>=3.14,<3.16`, add
+Quint Connect to the development dependency group.
 
 ```sh
-uv venv --python 3.14
-uv pip install quint-connect-py
+uv add --group dev quint-connect-py
 ```
 
-Import `quint_connect` in that environment. In an existing uv project whose
-supported Python versions are within the package's range, use
-`uv add --dev quint-connect-py` to add it as a test dependency.
+To start a new project in an empty directory, initialize it first.
+
+```sh
+uv init --bare --python '>=3.14,<3.16'
+uv add --group dev quint-connect-py
+```
+
+Use `uv run` to run Python or your test command in the project environment.
+The Python import is `quint_connect`.
 
 ## Write a driver
 
@@ -76,18 +82,50 @@ run(
 )
 ```
 
-The first release targets the Rust and TypeScript backends of Quint 0.34.0.
+Quint Connect supports the Rust and TypeScript backends of Quint 0.34.0.
 To generate traces from a named test, pass
 `NamedTest("counter.qnt", test="roundTripTest")` and set `action_path` to the
 field path where the model records the operation. `StateMismatchError` and
 `DriverError` from generated traces expose `seed` and `artifact_path`. Pass
-the saved ITF to `replay()` with the same driver and selectors. When
-specifying `artifact_dir`, create the parent directory before calling
-`run()`. If saving fails, inspect `artifact_error`.
+the saved ITF to `replay()` with the same driver and selectors. When saving a
+failed trace, `run()` creates `artifact_dir` and any missing parent directories,
+then writes the trace to its own subdirectory. Relative paths are resolved
+against the caller's working directory. If creating the directory or saving the
+trace fails, the original error carries the OS error in `artifact_error`.
 
 Use enum members such as `Backend.RUST` for evaluator selection and
 `DriverStage.APPLY`, `QuintStage.LOOKUP`, or `WorkspaceStage.RESERVE` to
 inspect failure stages.
+
+## Upgrade from 0.1
+
+In 0.2, use `backend=Backend.RUST` in place of `backend="rust"`, and
+`backend=Backend.TYPESCRIPT` for the TypeScript evaluator. For code that
+branches on an exception's stage, compare it with the corresponding enum
+member, such as `DriverStage.APPLY`. Use `stage.value` to log the string.
+
+If your driver factory uses an outer `ExitStack` to close a harness, move
+that ownership into a [driver context](#write-a-driver). Pass the context
+factory as `driver_context` to `run()` or `replay()`. Each trace gets its own
+harness and closes it before the next one opens.
+
+```python
+from quint_connect import Backend, Simulation, run
+
+run(
+    Simulation("counter.qnt", n_traces=10),
+    driver_context=driver_context,
+    quint="quint",
+    backend=Backend.RUST,
+    artifact_dir="_build/quint-connect",
+    action_path=("op",),
+    state_path=("count",),
+)
+```
+
+On a driver failure during generated replay, read `DriverError.artifact_path`
+and `DriverError.seed` to reproduce the failure. The original Python exception
+is available as `__cause__`.
 
 ## Run from pytest
 
