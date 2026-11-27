@@ -205,6 +205,50 @@ module quint_cli_test {
       config: Simulation({ ...defaultSimulation, maxSteps: CliSpecified(-1) }),
     }, List("0")) == InvalidStepLimit
 
+  run generationLimitsRejectUnrepresentableCliIntegersTest =
+    Set(9007199254740992, 9007199254740993).forall(limit => all {
+      quintCommand({ ...baseRequest,
+        config: Simulation({ ...defaultSimulation, nTraces: CliSpecified(limit) }),
+      }, List("0")) == InvalidTraceCount,
+      quintCommand({ ...baseRequest,
+        config: Simulation({ ...defaultSimulation, maxSamples: CliSpecified(limit) }),
+      }, List("0")) == InvalidSampleLimit,
+      quintCommand({ ...baseRequest,
+        config: Simulation({ ...defaultSimulation, maxSteps: CliSpecified(limit) }),
+      }, List("0")) == InvalidStepLimit,
+      quintCommand({ ...baseRequest,
+        config: NamedTestMode({ name: List(65), maxSamples: CliSpecified(limit) }),
+      }, List("0")) == InvalidSampleLimit,
+    })
+
+  run generationLimitsPreserveLargestSafeCliIntegerTest = {
+    val largest = 9007199254740991
+    val options = {
+      ...defaultSimulation,
+      nTraces: CliSpecified(largest),
+      maxSteps: CliSpecified(largest),
+    }
+    all {
+      match quintCommand({ ...baseRequest, config: Simulation(options) }, List("0")) {
+        | CommandReady(command) =>
+          command.argv.slice(5, command.argv.length()) == List(
+            IntegerOption({ flag: "--n-traces", value: largest }),
+            IntegerOption({ flag: "--max-samples", value: largest }),
+            IntegerOption({ flag: "--max-steps", value: largest }),
+          )
+        | _ => false
+      },
+      match quintCommand({ ...baseRequest,
+        config: NamedTestMode({ name: List(65), maxSamples: CliSpecified(largest) }),
+      }, List("0")) {
+        | CommandReady(command) =>
+          command.argv.nth(command.argv.length() - 1) ==
+            IntegerOption({ flag: "--max-samples", value: largest })
+        | _ => false
+      },
+    }
+  }
+
   run simulationValidatesSeedAndLimitsInOrderTest = {
     val options = {
       ...defaultSimulation,

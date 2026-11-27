@@ -99,10 +99,13 @@ module quint_cli {
       | CliSpecified(value) => value
     }
 
-  pure def limitAtLeast(option: CliOption[int], minimum: int): bool =
+  // Quint reads count and limit flags as JavaScript numbers.
+  pure val maxCliInteger: int = 9007199254740991
+
+  pure def validOptionalLimit(option: CliOption[int], minimum: int): bool =
     match option {
       | CliDefault => true
-      | CliSpecified(value) => value >= minimum
+      | CliSpecified(value) => minimum <= value and value <= maxCliInteger
     }
 
   pure def optionArgument(option: CliOption[a], encode: (a) => CliArgument): List[CliArgument] =
@@ -138,9 +141,9 @@ module quint_cli {
         | Simulation(options) => {
           val nTraces = optionOr(options.nTraces, 1)
           val maxSamples = optionOr(options.maxSamples, nTraces)
-          if (nTraces <= 0) InvalidTraceCount
-          else if (maxSamples < nTraces) InvalidSampleLimit
-          else if (not(limitAtLeast(options.maxSteps, 0))) InvalidStepLimit
+          if (nTraces <= 0 or nTraces > maxCliInteger) InvalidTraceCount
+          else if (maxSamples < nTraces or maxSamples > maxCliInteger) InvalidSampleLimit
+          else if (not(validOptionalLimit(options.maxSteps, 0))) InvalidStepLimit
           else CommandReady({
             executable: request.executable,
             workspace: request.workspace,
@@ -157,7 +160,7 @@ module quint_cli {
           })
         }
         | NamedTestMode(options) =>
-          if (not(limitAtLeast(options.maxSamples, 1))) InvalidSampleLimit
+          if (not(validOptionalLimit(options.maxSamples, 1))) InvalidSampleLimit
           else CommandReady({
             executable: request.executable,
             workspace: request.workspace,
