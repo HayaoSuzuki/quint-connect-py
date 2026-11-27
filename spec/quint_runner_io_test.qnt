@@ -4,7 +4,7 @@ module quint_runner_io_test {
   import quint_itf as itf from "./quint_itf"
   import quint_connect_documents.* from "./quint_connect"
   import quint_connect(CALL_IDS = Set(1, 2, 3), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2),
-    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map()).* from "./quint_connect"
+    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map(), EXISTING_ARTIFACTS = Map()).* from "./quint_connect"
 
   pure val firstTrace: TracePosition = { trace: 2, traceIndex: 0 }
   pure val secondTrace: TracePosition = { trace: 41, traceIndex: 1 }
@@ -129,6 +129,8 @@ module quint_runner_io_test {
   run stagedPrefixIsPrivateUntilFullCopyIsPublishedTest =
     init
       .then(runToMismatch)
+      .then(planArtifactDirectories(1, List(1)))
+      .then(tryArtifactDirectory(1, StorageSucceeded))
       .then(beginArtifactCopy(1))
       .then(writeArtifactCopy(1, 5))
       .expect(filesystem.workspaces.get(1).evidence == fs::StagedEvidence({
@@ -159,6 +161,8 @@ module quint_runner_io_test {
   run incompleteCopyCannotBePublishedTest =
     init
       .then(runToMismatch)
+      .then(planArtifactDirectories(1, List(1)))
+      .then(tryArtifactDirectory(1, StorageSucceeded))
       .then(beginArtifactCopy(1))
       .then(writeArtifactCopy(1, 5))
       .then(completeArtifactCopy(1, StorageSucceeded).fail())
@@ -166,6 +170,8 @@ module quint_runner_io_test {
   run publicationFailureAfterFullWritePreservesMismatchTest =
     init
       .then(runToMismatch)
+      .then(planArtifactDirectories(1, List(1)))
+      .then(tryArtifactDirectory(1, StorageSucceeded))
       .then(beginArtifactCopy(1))
       .then(writeArtifactCopy(1, originalBytes.length()))
       .expect(filesystem.workspaces.get(1).evidence == fs::StagedEvidence({

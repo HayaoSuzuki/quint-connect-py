@@ -2,7 +2,7 @@ module quint_saved_replay_test {
   import quint_connect_documents.* from "./quint_connect"
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2),
-    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases).* from "./quint_connect"
+    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases, EXISTING_ARTIFACTS = Map()).* from "./quint_connect"
 
   pure val firstPosition: TracePosition = { trace: 0, traceIndex: 0 }
   pure val secondPosition: TracePosition = { trace: 1, traceIndex: 1 }

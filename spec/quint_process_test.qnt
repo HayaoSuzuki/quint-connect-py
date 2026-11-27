@@ -2,7 +2,7 @@ module quint_process_test {
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_connect_documents.* from "./quint_connect"
   import quint_connect(CALL_IDS = Set(1), WORKSPACE_IDS = Set(7), DRIVER_IDS = Set(1),
-    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map()).* from "./quint_connect"
+    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map(), EXISTING_ARTIFACTS = Map()).* from "./quint_connect"
 
   pure val generation: Generation = {
     expectation: SimulationCount(1), seed: sampleSeed, workspace: 7, artifactRoot: defaultArtifactRoot,

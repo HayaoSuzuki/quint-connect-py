@@ -180,7 +180,10 @@ module quint_connect {
     actual: Value,
   }
 
-  type SaveResult = ArtifactSaved(fs::FilePath) | ArtifactSaveFailed(str)
+  type ArtifactDirectoryProblem = { root: str, directory: int, cause: str }
+  type SaveResult = ArtifactSaved(fs::FilePath) | ArtifactDirectoryFailed(ArtifactDirectoryProblem) | ArtifactSaveFailed(str)
+  type ArtifactPreparation = ArtifactUnplanned | ArtifactCandidates(List[int]) | ArtifactReadyToCopy
+  type DirectoryAttempt = DirectoryReserved | DirectoryCollision | DirectoryRejected(str)
 
   type Artifacts =
     | FromSavedTrace
@@ -227,7 +230,7 @@ module quint_connect {
     | AwaitingDriver(ValidatedTrace)
     | AwaitingOperation(ActiveTrace)
     | AwaitingObservation(ActiveTrace)
-    | AwaitingArtifact({ generation: Generation, detail: Mismatch })
+    | AwaitingArtifact({ generation: Generation, detail: Mismatch, preparation: ArtifactPreparation })
     | AwaitingCleanup({ generation: Generation, result: Outcome })
     | Finished(Outcome)
 
@@ -253,7 +256,8 @@ module quint_connect {
     | ObservationCalled({ context: DriverStep, expected: Value })
     | ObservationMatched({ position: StepPosition, actual: Value })
     | DifferenceObserved(Mismatch)
-    | SaveAttempted({ position: TracePosition, result: StorageResult })
+    | ArtifactDirectoryTried({ root: str, directory: int, result: DirectoryAttempt })
+    | SaveAttempted({ position: TracePosition, result: SaveResult })
     | CleanupAttempted({ workspace: WorkspaceId, result: StorageResult })
     | FailureRecognized(Failure)
     | Returned(Outcome)
@@ -270,11 +274,21 @@ module quint_connect {
   const GENERATED_INPUTS: Set[fs::Bytes]
   const SAVED_INPUTS: str -> fs::Bytes
   const SAVED_ALIASES: str -> fs::FilePath
+  const EXISTING_ARTIFACTS: fs::ArtifactDirectory -> fs::TraceFiles
 
   pure val initialFilesystem: fs::FileSystem = {
-    ...fs::emptyFileSystem,
-    files: SAVED_INPUTS.keys().fold(Map(), (acc, path) => acc.put(fs::SavedFile(path), SAVED_INPUTS.get(path))),
-    aliases: SAVED_ALIASES.keys().fold(Map(), (acc, path) => acc.put(fs::SavedFile(path), SAVED_ALIASES.get(path))),
+    val saved = SAVED_INPUTS.keys().fold(Map(), (acc, path) => acc.put(fs::SavedFile(path), SAVED_INPUTS.get(path)))
+    val existing = EXISTING_ARTIFACTS.keys().fold(saved, (files, directory) => {
+      val traces = EXISTING_ARTIFACTS.get(directory)
+      traces.keys().fold(files, (acc, trace) =>
+        acc.put(fs::evidencePath(directory.root, directory.directory, trace), traces.get(trace)))
+    })
+    {
+      ...fs::emptyFileSystem,
+      files: existing,
+      aliases: SAVED_ALIASES.keys().fold(Map(), (acc, path) => acc.put(fs::SavedFile(path), SAVED_ALIASES.get(path))),
+      artifactDirectories: EXISTING_ARTIFACTS.keys().mapBy(_ => fs::ExistingArtifactDirectory),
+    }
   }
 
   var calls: CallId -> CallState
@@ -455,7 +469,7 @@ module quint_connect {
       | SavedPaths(paths) => stop(recorded, source, StatesDiffer({
           detail: detail, artifacts: FromSavedFile(paths.nth(detail.position.trace.traceIndex)),
         }))
-      | GeneratedItf(g) => { ...recorded, phase: AwaitingArtifact({ generation: g, detail: detail }) }
+      | GeneratedItf(g) => { ...recorded, phase: AwaitingArtifact({ generation: g, detail: detail, preparation: ArtifactUnplanned }) }
     }
   }
 
@@ -481,12 +495,8 @@ module quint_connect {
     }
   }
 
-  pure def onArtifact(s: CallState, g: Generation, detail: Mismatch, result: StorageResult): CallState = {
-    val recorded = recordEvent(s, s.phase, SaveAttempted({ position: detail.position.trace, result: result }))
-    val save = match result {
-      | StorageSucceeded => ArtifactSaved(fs::evidencePath(g.artifactRoot, g.workspace, detail.position.trace.trace))
-      | StorageFailed(cause) => ArtifactSaveFailed(cause)
-    }
+  pure def onArtifact(s: CallState, g: Generation, detail: Mismatch, save: SaveResult): CallState = {
+    val recorded = recordEvent(s, s.phase, SaveAttempted({ position: detail.position.trace, result: save }))
     stop(recorded, GeneratedItf(g), StatesDiffer({
       detail: detail,
       artifacts: FromGeneration({ seed: g.seed, save: save }),
@@ -907,14 +917,74 @@ module quint_connect {
       | _ => inapplicable
     }
 
+  action planArtifactDirectories(id: CallId, candidates: List[int]): bool =
+    match calls.get(id).phase {
+      | AwaitingArtifact(ctx) => all {
+          ctx.preparation == ArtifactUnplanned,
+          candidates.length() > 0,
+          candidates.indices().forall(i => candidates.nth(i) >= 0),
+          changeCall(id, { ...calls.get(id), phase: AwaitingArtifact({
+            ...ctx, preparation: ArtifactCandidates(candidates),
+          }) }),
+        }
+      | _ => inapplicable
+    }
+
+  action tryArtifactDirectory(id: CallId, result: StorageResult): bool =
+    match calls.get(id).phase {
+      | AwaitingArtifact(ctx) =>
+        match ctx.preparation {
+          | ArtifactCandidates(candidates) => {
+            val directory = candidates.head()
+            val root = ctx.generation.artifactRoot
+            val workspace = ctx.generation.workspace
+            val current = calls.get(id)
+            if (not(fs::artifactDirectoryAvailable(filesystem, root, directory))) {
+              val remaining = candidates.tail()
+              val recorded = recordEvent(current, current.phase, ArtifactDirectoryTried({
+                root: root, directory: directory, result: DirectoryCollision,
+              }))
+              if (remaining.length() > 0)
+                changeCall(id, { ...recorded, phase: AwaitingArtifact({
+                  ...ctx, preparation: ArtifactCandidates(remaining),
+                }) })
+              else
+                changeCall(id, onArtifact(recorded, ctx.generation, ctx.detail, ArtifactDirectoryFailed({
+                  root: root, directory: directory, cause: "artifact directory already exists",
+                })))
+            } else
+              match result {
+                | StorageSucceeded => all {
+                    fs::canReserveArtifactDirectory(filesystem, workspace, directory),
+                    changeCallWithFiles(id, recordEvent(current, AwaitingArtifact({
+                      ...ctx, preparation: ArtifactReadyToCopy,
+                    }), ArtifactDirectoryTried({
+                      root: root, directory: directory, result: DirectoryReserved,
+                    })), fs::reserveArtifactDirectory(filesystem, workspace, directory)),
+                  }
+                | StorageFailed(cause) => {
+                  val recorded = recordEvent(current, current.phase, ArtifactDirectoryTried({
+                    root: root, directory: directory, result: DirectoryRejected(cause),
+                  }))
+                  changeCall(id, onArtifact(recorded, ctx.generation, ctx.detail,
+                    ArtifactDirectoryFailed({ root: root, directory: directory, cause: cause })))
+                }
+              }
+          }
+          | _ => inapplicable
+        }
+      | _ => inapplicable
+    }
+
   action beginArtifactCopy(id: CallId): bool =
     match calls.get(id).phase {
       | AwaitingArtifact(ctx) => {
         val workspace = ctx.generation.workspace
         val trace = ctx.detail.position.trace.trace
         all {
-          fs::canStageEvidence(filesystem, workspace, trace),
-          changeCallWithFiles(id, calls.get(id), fs::stageEvidence(filesystem, workspace, trace)),
+          ctx.preparation == ArtifactReadyToCopy,
+          fs::canStageReservedEvidence(filesystem, workspace, trace),
+          changeCallWithFiles(id, calls.get(id), fs::stageReservedEvidence(filesystem, workspace, trace)),
         }
       }
       | _ => inapplicable
@@ -940,15 +1010,23 @@ module quint_connect {
     match calls.get(id).phase {
       | AwaitingArtifact(ctx) => {
         val workspace = ctx.generation.workspace
-        val updated = onArtifact(calls.get(id), ctx.generation, ctx.detail, result)
         match result {
-          | StorageSucceeded => all {
-              fs::canPublishEvidence(filesystem, workspace),
-              changeCallWithFiles(id, updated, fs::publishEvidence(filesystem, workspace)),
+          | StorageSucceeded =>
+            match filesystem.workspaces.get(workspace).artifactDirectory {
+              | ArtifactDirectoryReserved(directory) => {
+                val saved = fs::evidencePath(ctx.generation.artifactRoot, directory, ctx.detail.position.trace.trace)
+                all {
+                  fs::canPublishEvidence(filesystem, workspace),
+                  changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.detail, ArtifactSaved(saved)),
+                    fs::publishEvidence(filesystem, workspace)),
+                }
+              }
+              | NoArtifactDirectory => inapplicable
             }
-          | StorageFailed(_) => all {
+          | StorageFailed(cause) => all {
               fs::canAbandonEvidence(filesystem, workspace),
-              changeCallWithFiles(id, updated, fs::abandonEvidence(filesystem, workspace)),
+              changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.detail, ArtifactSaveFailed(cause)),
+                fs::abandonEvidence(filesystem, workspace)),
             }
         }
       }
@@ -967,14 +1045,16 @@ module quint_connect {
       | AwaitingArtifact(ctx) => {
         val workspace = ctx.generation.workspace
         val trace = ctx.detail.position.trace.trace
+        val save = match result {
+          | StorageSucceeded => ArtifactSaved(fs::evidencePath(ctx.generation.artifactRoot, workspace, trace))
+          | StorageFailed(cause) => ArtifactSaveFailed(cause)
+        }
         all {
+          ctx.preparation == ArtifactUnplanned,
           copyAgrees(result, copy),
           fs::canRetainTraceFile(filesystem, workspace, trace, copy),
-          changeCallWithFiles(
-            id,
-            onArtifact(calls.get(id), ctx.generation, ctx.detail, result),
-            fs::retainTraceFile(filesystem, workspace, trace, copy)
-          ),
+          changeCallWithFiles(id, onArtifact(calls.get(id), ctx.generation, ctx.detail, save),
+            fs::retainTraceFile(filesystem, workspace, trace, copy)),
         }
       }
       | _ => inapplicable
@@ -1224,6 +1304,7 @@ module quint_connect {
 
   pure def allowedAfterFailure(event: Event): bool =
     match event {
+      | ArtifactDirectoryTried(_) => true
       | SaveAttempted(_) => true
       | CleanupAttempted(_) => true
       | FailureRecognized(_) => true
@@ -1247,15 +1328,6 @@ module quint_connect {
       }
     )
 
-  pure def savedRequiredTrace(
-    g: Generation, position: TracePosition, save: SaveResult, storage: StorageResult
-  ): bool =
-    match storage {
-      | StorageSucceeded =>
-        save == ArtifactSaved(fs::evidencePath(g.artifactRoot, g.workspace, position.trace))
-      | StorageFailed(cause) => save == ArtifactSaveFailed(cause)
-    }
-
   pure def artifactMatchesMismatch(history: List[Event], index: int, mismatch: Mismatch, artifact: Artifacts): bool =
     match artifact {
       | FromSavedTrace =>
@@ -1277,7 +1349,7 @@ module quint_connect {
                   match prior {
                     | GenerationCompleted(completed) =>
                       completed.generation.seed == detail.seed and
-                        savedRequiredTrace(completed.generation, attempt.position, detail.save, attempt.result)
+                        detail.save == attempt.result
                     | _ => false
                   }
                 )
@@ -1288,8 +1360,15 @@ module quint_connect {
 
   pure def matchingDiagnostics(history: List[Event], index: int): bool =
     match history.nth(index) {
+      | ArtifactDirectoryTried(_) =>
+        hasPrior(history, index, event =>
+          match event {
+            | DifferenceObserved(_) => true
+            | _ => false
+          }
+        )
       | SaveAttempted(attempt) =>
-        previousIs(history, index, event =>
+        hasPrior(history, index, event =>
           match event {
             | DifferenceObserved(detail) => detail.position.trace == attempt.position
             | _ => false
@@ -1518,11 +1597,19 @@ module quint_connect {
         match history.nth(index) {
           | SaveAttempted(attempt) => {
             val trace = attempt.position.trace
-            val savedPath = fs::evidencePath(storage.root, workspace, trace)
-            if (attempt.result == StorageSucceeded)
-              storage.evidence == fs::PublishedEvidence(trace) and filesystem.files.keys().contains(savedPath)
-            else
-              storage.evidence == fs::AbandonedEvidence(trace) and not(filesystem.files.keys().contains(savedPath))
+            match attempt.result {
+              | ArtifactSaved(path) =>
+                match storage.artifactDirectory {
+                  | ArtifactDirectoryReserved(directory) =>
+                    storage.evidence == fs::PublishedEvidence(trace) and
+                      path == fs::evidencePath(storage.root, directory, trace) and filesystem.files.keys().contains(path)
+                  | NoArtifactDirectory => false
+                }
+              | ArtifactDirectoryFailed(_) =>
+                storage.evidence == fs::NoEvidence and storage.artifactDirectory == fs::NoArtifactDirectory
+              | ArtifactSaveFailed(_) =>
+                storage.evidence == fs::AbandonedEvidence(trace) and storage.artifactDirectory == fs::NoArtifactDirectory
+            }
           }
           | _ => true
         }
@@ -1575,7 +1662,12 @@ module quint_connect {
             val bytes = snapshot.files.get(fs::workingPath(workspace, staged.trace))
             List(3, 0, bytes.length() - staged.bytes.length(), 0, 0)
           }
-          | _ => List(3, 1, 0, 0, 0)
+          | _ =>
+            match ctx.preparation {
+              | ArtifactUnplanned => List(3, 3, 0, 0, 0)
+              | ArtifactCandidates(candidates) => List(3, 2, candidates.length(), 0, 0)
+              | ArtifactReadyToCopy => List(3, 1, 0, 0, 0)
+            }
         }
       }
       | AwaitingCleanup(_) => List(2, 0, 0, 0, 0)
@@ -1611,8 +1703,13 @@ module quint_connect {
       | AwaitingOperation(_) => true
       | AwaitingObservation(_) => true
       | AwaitingArtifact(ctx) =>
-        fs::canStageEvidence(filesystem, ctx.generation.workspace, ctx.detail.position.trace.trace) or
-          fs::canAbandonEvidence(filesystem, ctx.generation.workspace)
+        match ctx.preparation {
+          | ArtifactUnplanned => true
+          | ArtifactCandidates(candidates) => candidates.length() > 0
+          | ArtifactReadyToCopy =>
+            fs::canStageReservedEvidence(filesystem, ctx.generation.workspace, ctx.detail.position.trace.trace) or
+              fs::canAbandonEvidence(filesystem, ctx.generation.workspace)
+        }
       | AwaitingCleanup(ctx) =>
         fs::canCleanupFiles(filesystem, ctx.generation.workspace, fs::RemoveComplete)
       | Finished(_) => false
@@ -1717,12 +1814,16 @@ module quint_connect {
     if (fs::workspaceAvailable(filesystem, workspace)) inapplicable
     else {
       val storage = filesystem.workspaces.get(workspace)
-      match storage.evidence {
-        | StagedEvidence(staged) =>
-          startReplayPaths(id, List(fs::evidencePath(storage.root, workspace, staged.trace)), selection)
-        | PublishedEvidence(trace) =>
-          startReplayPaths(id, List(fs::evidencePath(storage.root, workspace, trace)), selection)
-        | _ => inapplicable
+      match storage.artifactDirectory {
+        | NoArtifactDirectory => inapplicable
+        | ArtifactDirectoryReserved(directory) =>
+          match storage.evidence {
+            | StagedEvidence(staged) =>
+              startReplayPaths(id, List(fs::evidencePath(storage.root, directory, staged.trace)), selection)
+            | PublishedEvidence(trace) =>
+              startReplayPaths(id, List(fs::evidencePath(storage.root, directory, trace)), selection)
+            | _ => inapplicable
+          }
       }
     }
 
@@ -1797,6 +1898,9 @@ module quint_connect {
         applyOperation(id, OperationFailed("operation failed")),
         observeState(id, Observed(observed)),
         observeState(id, ObservationFailed("observation failed")),
+        planArtifactDirectories(id, List(42, 100 + id)),
+        tryArtifactDirectory(id, StorageSucceeded),
+        tryArtifactDirectory(id, StorageFailed("artifact directory unavailable")),
         beginArtifactCopy(id),
         copySampledBytes(id),
         completeArtifactCopy(id, StorageSucceeded),
@@ -1877,7 +1981,7 @@ module quint_connect_documents {
 
 module quint_connect_sample {
   import quint_connect_documents.*
-  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases).*
+  import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1, 2), DRIVER_IDS = Set(1, 2, 3, 4), GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases, EXISTING_ARTIFACTS = Map()).*
 
   observation replayStarted = anyCallHas(event =>
     match event {
@@ -2002,6 +2106,20 @@ module quint_connect_sample {
   observation mismatchObserved = anyCallHas(event =>
     match event {
       | DifferenceObserved(_) => true
+      | _ => false
+    }
+  )
+
+  observation artifactDirectoryReserved = anyCallHas(event =>
+    match event {
+      | ArtifactDirectoryTried(attempt) => attempt.result == DirectoryReserved
+      | _ => false
+    }
+  )
+
+  observation artifactDirectoryCollision = anyCallHas(event =>
+    match event {
+      | ArtifactDirectoryTried(attempt) => attempt.result == DirectoryCollision
       | _ => false
     }
   )

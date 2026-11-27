@@ -23,7 +23,7 @@ module quint_parallel_sample {
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_connect(
     CALL_IDS = parallelCallIds, WORKSPACE_IDS = parallelCallIds, DRIVER_IDS = parallelDriverIds,
-    GENERATED_INPUTS = parallelGeneratedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases
+    GENERATED_INPUTS = parallelGeneratedInputs, SAVED_INPUTS = savedInputs, SAVED_ALIASES = savedAliases, EXISTING_ARTIFACTS = Map()
   ).* from "./quint_connect"
 
   // Exercise arbitrary interleavings once all four calls own a workspace.

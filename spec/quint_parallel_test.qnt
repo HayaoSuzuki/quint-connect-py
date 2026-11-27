@@ -5,7 +5,7 @@ module quint_parallel_test {
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_connect(
     CALL_IDS = parallelCallIds, WORKSPACE_IDS = parallelCallIds, DRIVER_IDS = parallelDriverIds,
-    GENERATED_INPUTS = parallelGeneratedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map()
+    GENERATED_INPUTS = parallelGeneratedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map(), EXISTING_ARTIFACTS = Map()
   ).* from "./quint_connect"
 
   pure val sharedRoot = "shared artifacts"

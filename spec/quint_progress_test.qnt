@@ -2,7 +2,7 @@ module quint_progress_test {
   import quint_filesystem as fs from "./quint_filesystem"
   import quint_connect_documents.* from "./quint_connect"
   import quint_connect(CALL_IDS = Set(1, 2), WORKSPACE_IDS = Set(1), DRIVER_IDS = Set(1, 2),
-    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map()).* from "./quint_connect"
+    GENERATED_INPUTS = generatedInputs, SAVED_INPUTS = Map(), SAVED_ALIASES = Map(), EXISTING_ARTIFACTS = Map()).* from "./quint_connect"
 
   run nextTraceCanBeLongerAndBothCallsStillConcludeTest =
     init
@@ -48,6 +48,8 @@ module quint_progress_test {
       .then(createDriver(1, FactorySucceeded(1)))
       .then(applyOperation(1, OperationApplied))
       .then(observeState(1, Observed(integerDigit(1))))
+      .then(planArtifactDirectories(1, List(1)))
+      .then(tryArtifactDirectory(1, StorageSucceeded))
       .then(beginArtifactCopy(1))
       .expect(processingProgress and hasNextResponse(1))
       .then(completeArtifactCopy(1, StorageSucceeded))
